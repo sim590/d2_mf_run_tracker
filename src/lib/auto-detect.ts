@@ -1,7 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type Region = {
+export type NormalizedRegion = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type RegionPercent = {
   x: number;
   y: number;
   width: number;
@@ -24,8 +31,8 @@ export type Preview = {
 };
 
 export type AutoDetectConfig = {
-  loading_region: Region;
-  menu_region: Region | null;
+  loading_region: NormalizedRegion;
+  menu_region: NormalizedRegion | null;
   dark_threshold: number;
   dark_samples: number;
   bright_samples: number;
@@ -56,25 +63,34 @@ export type RunEndPayload = {
   source: string;
 };
 
-export const DEFAULT_REGION: Region = {
-  x: 1175,
-  y: 500,
-  width: 200,
-  height: 300,
+export const DEFAULT_REGION_PERCENT: RegionPercent = {
+  x: 45.9,
+  y: 34.7,
+  width: 7.8,
+  height: 20.8,
 };
 
-export const DEFAULT_MENU_REGION: Region = {
-  x: 160,
-  y: 200,
-  width: 200,
-  height: 100,
+export const DEFAULT_MENU_REGION_PERCENT: RegionPercent = {
+  x: 6.25,
+  y: 13.89,
+  width: 7.81,
+  height: 6.94,
 };
+
+export function percentToNormalized(region: RegionPercent): NormalizedRegion {
+  return {
+    x: region.x / 100,
+    y: region.y / 100,
+    width: region.width / 100,
+    height: region.height / 100,
+  };
+}
 
 export function findGameWindow(): Promise<GameWindowInfo> {
   return invoke<GameWindowInfo>("find_game_window");
 }
 
-export function capturePreview(region: Region): Promise<Preview> {
+export function capturePreview(region: NormalizedRegion): Promise<Preview> {
   return invoke<Preview>("capture_preview", { region });
 }
 

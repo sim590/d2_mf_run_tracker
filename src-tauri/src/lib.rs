@@ -10,7 +10,7 @@ mod auto_detect;
 
 use auto_detect::{
     AutoDetectConfig, AutoDetectStatus, CaptureBackend, DetectorEvent, GameWindowInfo,
-    LoadingDetector, Preview, Region, RunEndPayload, RunStartPayload, X11Backend,
+    LoadingDetector, NormalizedRegion, Preview, RunEndPayload, RunStartPayload, X11Backend,
 };
 
 struct AutoDetectHandle {
@@ -126,13 +126,14 @@ fn find_game_window() -> Result<GameWindowInfo, String> {
 }
 
 #[tauri::command]
-fn capture_preview(region: Region) -> Result<Preview, String> {
+fn capture_preview(region: NormalizedRegion) -> Result<Preview, String> {
     let backend = X11Backend::new().map_err(|error| error.to_string())?;
     let window = backend
         .find_game_window()
         .map_err(|error| error.to_string())?;
+    let pixels = region.to_pixels(&window);
     let image = backend
-        .capture_region(&window, region)
+        .capture_region(&window, pixels)
         .map_err(|error| error.to_string())?;
     let brightness = image.mean_brightness();
     let image = image.to_png_base64().map_err(|error| error.to_string())?;
@@ -201,17 +202,28 @@ fn run_auto_detect(
     };
     let mut detector = LoadingDetector::new(config.detector_config());
     let mut error_count = 0u32;
+    let mut last_window_refresh = Instant::now();
 
     while !stop.load(Ordering::Relaxed) {
-        match backend.capture_region(&window, config.loading_region) {
+        if last_window_refresh.elapsed() >= Duration::from_secs(5) {
+            if let Ok(found) = backend.find_game_window() {
+                window = found;
+            }
+            last_window_refresh = Instant::now();
+        }
+        let loading_region = config.loading_region.to_pixels(&window);
+        match backend.capture_region(&window, loading_region) {
             Ok(image) => {
                 error_count = 0;
                 let brightness = image.mean_brightness();
                 let (menu_brightness, menu_error) = match config.menu_region {
-                    Some(menu_region) => match backend.capture_region(&window, menu_region) {
-                        Ok(menu_image) => (Some(menu_image.mean_brightness()), None),
-                        Err(error) => (None, Some(error.to_string())),
-                    },
+                    Some(menu_region) => {
+                        let menu_pixels = menu_region.to_pixels(&window);
+                        match backend.capture_region(&window, menu_pixels) {
+                            Ok(menu_image) => (Some(menu_image.mean_brightness()), None),
+                            Err(error) => (None, Some(error.to_string())),
+                        }
+                    }
                     None => (None, None),
                 };
                 let events =

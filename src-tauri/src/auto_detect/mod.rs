@@ -13,15 +13,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub use capture::{CaptureBackend, GameWindowInfo, Region};
+pub use capture::{CaptureBackend, GameWindowInfo, NormalizedRegion};
 pub use detector::{DetectorConfig, DetectorEvent, LoadingDetector, Phase};
 pub use x11::X11Backend;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AutoDetectConfig {
-    pub loading_region: Region,
-    pub menu_region: Option<Region>,
+    pub loading_region: NormalizedRegion,
+    pub menu_region: Option<NormalizedRegion>,
     pub dark_threshold: f32,
     pub dark_samples: u32,
     pub bright_samples: u32,
@@ -35,7 +35,7 @@ pub struct AutoDetectConfig {
 impl Default for AutoDetectConfig {
     fn default() -> Self {
         Self {
-            loading_region: Region::default(),
+            loading_region: NormalizedRegion::default(),
             menu_region: None,
             dark_threshold: 22.0,
             dark_samples: 2,

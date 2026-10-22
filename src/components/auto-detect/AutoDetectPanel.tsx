@@ -8,15 +8,16 @@ import { Label } from "@/components/ui/label";
 import {
   type AutoDetectStatus,
   capturePreview,
-  DEFAULT_MENU_REGION,
-  DEFAULT_REGION,
+  DEFAULT_MENU_REGION_PERCENT,
+  DEFAULT_REGION_PERCENT,
   findGameWindow,
   type GameWindowInfo,
   getAutoDetectStatus,
   listenRunEnd,
   listenRunStart,
   type Preview,
-  type Region,
+  percentToNormalized,
+  type RegionPercent,
   startAutoDetect,
   stopAutoDetect,
 } from "@/lib/auto-detect";
@@ -27,8 +28,10 @@ type LogEntry = {
 };
 
 export function AutoDetectPanel() {
-  const [region, setRegion] = useState<Region>(DEFAULT_REGION);
-  const [menuRegion, setMenuRegion] = useState<Region>(DEFAULT_MENU_REGION);
+  const [region, setRegion] = useState<RegionPercent>(DEFAULT_REGION_PERCENT);
+  const [menuRegion, setMenuRegion] = useState<RegionPercent>(
+    DEFAULT_MENU_REGION_PERCENT,
+  );
   const [menuEnabled, setMenuEnabled] = useState(true);
   const [windowInfo, setWindowInfo] = useState<GameWindowInfo | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
@@ -134,7 +137,7 @@ export function AutoDetectPanel() {
     }
   };
 
-  const updateRegion = (key: keyof Region, value: number) => {
+  const updateRegion = (key: keyof RegionPercent, value: number) => {
     setRegion((current) => ({ ...current, [key]: value }));
   };
 
@@ -150,7 +153,7 @@ export function AutoDetectPanel() {
 
   const handlePreview = () => {
     void runAction("preview", async () => {
-      const result = await capturePreview(region);
+      const result = await capturePreview(percentToNormalized(region));
       setPreview(result);
       setWindowInfo(result.window);
       appendLog(`preview brightness ${result.brightness.toFixed(1)}`);
@@ -159,7 +162,7 @@ export function AutoDetectPanel() {
 
   const handleMenuPreview = () => {
     void runAction("menu-preview", async () => {
-      const result = await capturePreview(menuRegion);
+      const result = await capturePreview(percentToNormalized(menuRegion));
       setMenuPreview(result);
       setWindowInfo(result.window);
       appendLog(`menu preview brightness ${result.brightness.toFixed(1)}`);
@@ -169,8 +172,8 @@ export function AutoDetectPanel() {
   const handleStart = () => {
     void runAction("start", async () => {
       await startAutoDetect({
-        loading_region: region,
-        menu_region: menuEnabled ? menuRegion : null,
+        loading_region: percentToNormalized(region),
+        menu_region: menuEnabled ? percentToNormalized(menuRegion) : null,
         dark_threshold: 22,
         dark_samples: 2,
         bright_samples: 2,
@@ -235,17 +238,20 @@ export function AutoDetectPanel() {
         <h2 className="tracker-heading text-lg">Loading region</h2>
         <p className="text-sm text-muted-foreground">
           A small region that is bright in game and black during a loading
-          screen. The default is near the center for 2560x1440.
+          screen. Values are percentages of the game window; the defaults match
+          2560x1440.
         </p>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {(["x", "y", "width", "height"] as const).map((key) => (
             <div key={key} className="space-y-1.5">
-              <Label htmlFor={`region-${key}`}>{key}</Label>
+              <Label htmlFor={`region-${key}`}>{key} (%)</Label>
               <Input
                 className="h-10 text-sm"
                 id={`region-${key}`}
-                min={key === "width" || key === "height" ? 1 : undefined}
+                max={100}
+                min={key === "width" || key === "height" ? 0.1 : 0}
+                step={0.1}
                 type="number"
                 value={region[key]}
                 onChange={(event) =>
@@ -297,18 +303,21 @@ export function AutoDetectPanel() {
         <p className="text-sm text-muted-foreground">
           Bright on the character-select screen (for example the Diablo II logo)
           and dark in game. It ends the active run when you return to the menu;
-          loading screens inside the game do not end the run.
+          loading screens inside the game do not end the run. Values are
+          percentages of the game window.
         </p>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {(["x", "y", "width", "height"] as const).map((key) => (
             <div key={key} className="space-y-1.5">
-              <Label htmlFor={`menu-region-${key}`}>{key}</Label>
+              <Label htmlFor={`menu-region-${key}`}>{key} (%)</Label>
               <Input
                 className="h-10 text-sm"
                 disabled={!menuEnabled}
                 id={`menu-region-${key}`}
-                min={key === "width" || key === "height" ? 1 : undefined}
+                max={100}
+                min={key === "width" || key === "height" ? 0.1 : 0}
+                step={0.1}
                 type="number"
                 value={menuRegion[key]}
                 onChange={(event) =>
