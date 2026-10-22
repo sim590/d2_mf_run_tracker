@@ -25,9 +25,12 @@ export type Preview = {
 
 export type AutoDetectConfig = {
   loading_region: Region;
+  menu_region: Region | null;
   dark_threshold: number;
   dark_samples: number;
   bright_samples: number;
+  menu_threshold: number;
+  menu_samples: number;
   poll_interval_ms: number;
   min_run_seconds: number;
 };
@@ -36,6 +39,7 @@ export type AutoDetectStatus = {
   running: boolean;
   window: GameWindowInfo | null;
   last_brightness: number | null;
+  last_menu_brightness: number | null;
   phase: string;
   last_error: string | null;
   last_event: string | null;
@@ -52,8 +56,15 @@ export type RunEndPayload = {
 };
 
 export const DEFAULT_REGION: Region = {
-  x: 1180,
-  y: 670,
+  x: 1175,
+  y: 500,
+  width: 200,
+  height: 300,
+};
+
+export const DEFAULT_MENU_REGION: Region = {
+  x: 160,
+  y: 200,
   width: 200,
   height: 100,
 };

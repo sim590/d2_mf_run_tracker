@@ -207,15 +207,24 @@ fn run_auto_detect(
             Ok(image) => {
                 error_count = 0;
                 let brightness = image.mean_brightness();
-                let events = detector.process(brightness, Instant::now());
+                let (menu_brightness, menu_error) = match config.menu_region {
+                    Some(menu_region) => match backend.capture_region(&window, menu_region) {
+                        Ok(menu_image) => (Some(menu_image.mean_brightness()), None),
+                        Err(error) => (None, Some(error.to_string())),
+                    },
+                    None => (None, None),
+                };
+                let events =
+                    detector.process_with_menu(brightness, menu_brightness, Instant::now());
                 let phase = detector.phase().as_str().to_string();
 
                 update_status(&status, |current| {
                     current.running = true;
                     current.window = Some(window.clone());
                     current.last_brightness = Some(brightness);
+                    current.last_menu_brightness = menu_brightness;
                     current.phase = phase;
-                    current.last_error = None;
+                    current.last_error = menu_error;
                 });
 
                 for event in events {

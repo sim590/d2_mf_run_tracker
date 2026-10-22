@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import {
   type AutoDetectStatus,
   capturePreview,
+  DEFAULT_MENU_REGION,
   DEFAULT_REGION,
   findGameWindow,
   type GameWindowInfo,
@@ -27,8 +28,11 @@ type LogEntry = {
 
 export function AutoDetectPanel() {
   const [region, setRegion] = useState<Region>(DEFAULT_REGION);
+  const [menuRegion, setMenuRegion] = useState<Region>(DEFAULT_MENU_REGION);
+  const [menuEnabled, setMenuEnabled] = useState(true);
   const [windowInfo, setWindowInfo] = useState<GameWindowInfo | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
+  const [menuPreview, setMenuPreview] = useState<Preview | null>(null);
   const [status, setStatus] = useState<AutoDetectStatus | null>(null);
   const [log, setLog] = useState<LogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -153,13 +157,25 @@ export function AutoDetectPanel() {
     });
   };
 
+  const handleMenuPreview = () => {
+    void runAction("menu-preview", async () => {
+      const result = await capturePreview(menuRegion);
+      setMenuPreview(result);
+      setWindowInfo(result.window);
+      appendLog(`menu preview brightness ${result.brightness.toFixed(1)}`);
+    });
+  };
+
   const handleStart = () => {
     void runAction("start", async () => {
       await startAutoDetect({
         loading_region: region,
+        menu_region: menuEnabled ? menuRegion : null,
         dark_threshold: 22,
         dark_samples: 2,
         bright_samples: 2,
+        menu_threshold: 50,
+        menu_samples: 2,
         poll_interval_ms: 250,
         min_run_seconds: 3,
       });
@@ -265,6 +281,72 @@ export function AutoDetectPanel() {
 
       <section className="tracker-section-panel space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="tracker-heading text-lg">Menu region</h2>
+          <label className="flex items-center gap-2 text-sm text-muted-foreground">
+            <input
+              checked={menuEnabled}
+              className="size-4 accent-primary"
+              type="checkbox"
+              onChange={(event) => setMenuEnabled(event.target.checked)}
+            />
+            Enable menu probe
+          </label>
+        </div>
+
+        <p className="text-sm text-muted-foreground">
+          Bright on the character-select screen (for example the Diablo II logo)
+          and dark in game. It ends the active run and suppresses false starts
+          while you are in the menu.
+        </p>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {(["x", "y", "width", "height"] as const).map((key) => (
+            <div key={key} className="space-y-1.5">
+              <Label htmlFor={`menu-region-${key}`}>{key}</Label>
+              <Input
+                className="h-10 text-sm"
+                disabled={!menuEnabled}
+                id={`menu-region-${key}`}
+                min={key === "width" || key === "height" ? 1 : undefined}
+                type="number"
+                value={menuRegion[key]}
+                onChange={(event) =>
+                  setMenuRegion((current) => ({
+                    ...current,
+                    [key]: Number(event.target.value),
+                  }))
+                }
+              />
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            className="tracker-action-secondary"
+            disabled={!menuEnabled || busy === "menu-preview"}
+            onClick={handleMenuPreview}
+          >
+            Capture menu preview
+          </Button>
+          {menuPreview ? (
+            <span className="text-sm text-muted-foreground">
+              Brightness: {menuPreview.brightness.toFixed(1)}
+            </span>
+          ) : null}
+        </div>
+
+        {menuPreview ? (
+          <img
+            alt="Menu region preview"
+            className="max-h-64 w-full border border-border/70 bg-black object-contain"
+            src={menuPreview.image}
+          />
+        ) : null}
+      </section>
+
+      <section className="tracker-section-panel space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="tracker-heading text-lg">Detection</h2>
           <div className="flex gap-2">
             <Button
@@ -289,6 +371,10 @@ export function AutoDetectPanel() {
           <div>Phase: {status?.phase ?? "unknown"}</div>
           <div>
             Last brightness: {status?.last_brightness?.toFixed(1) ?? "none"}
+          </div>
+          <div>
+            Menu brightness:{" "}
+            {status?.last_menu_brightness?.toFixed(1) ?? "none"}
           </div>
           <div>Last event: {status?.last_event ?? "none"}</div>
           <div className="sm:col-span-2">
