@@ -143,7 +143,13 @@ function SessionRoute() {
     }
 
     void runAction("end-session", async () => {
-      if (resolvedActiveSession.completedRuns.length === 0) {
+      const activeRun = resolvedActiveSession.activeRun;
+
+      if (activeRun) {
+        await completeRun(activeRun.id, resolvedActiveSession.id);
+      }
+
+      if (!activeRun && resolvedActiveSession.completedRuns.length === 0) {
         await discardSession(resolvedActiveSession.id);
       } else {
         await endSession(resolvedActiveSession.id);

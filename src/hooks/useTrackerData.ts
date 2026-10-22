@@ -9,6 +9,7 @@ import {
   getFarmLocations,
 } from "@/lib/tracker-db";
 import { getTrackerErrorMessage } from "@/lib/tracker-error";
+import { TRACKER_REFRESH_EVENT } from "@/lib/tracker-events";
 
 type TrackerData = {
   farmLocations: FarmLocation[];
@@ -82,6 +83,17 @@ export function useTrackerData() {
       isMounted = false;
     };
   }, [loadTrackerData]);
+
+  useEffect(() => {
+    const handleRefresh = () => {
+      void refreshTracker();
+    };
+
+    window.addEventListener(TRACKER_REFRESH_EVENT, handleRefresh);
+    return () => {
+      window.removeEventListener(TRACKER_REFRESH_EVENT, handleRefresh);
+    };
+  }, [refreshTracker]);
 
   return {
     activeSession,

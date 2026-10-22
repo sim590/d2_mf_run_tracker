@@ -21,6 +21,7 @@ import {
   startAutoDetect,
   stopAutoDetect,
 } from "@/lib/auto-detect";
+import { AUTO_DETECT_STOPPED_EVENT } from "@/lib/tracker-events";
 
 type LogEntry = {
   at: string;
@@ -191,6 +192,7 @@ export function AutoDetectPanel() {
   const handleStop = () => {
     void runAction("stop", async () => {
       await stopAutoDetect();
+      window.dispatchEvent(new Event(AUTO_DETECT_STOPPED_EVENT));
       setStatus(await getAutoDetectStatus());
       appendLog("auto-detect stopped");
     });
@@ -201,8 +203,9 @@ export function AutoDetectPanel() {
       <SectionHeader title="Auto-detect (experimental)" />
 
       <p className="tracker-copy-muted text-sm">
-        Calls the Rust capture backend directly. Run events are logged here, not
-        written to SQLite. The region is relative to the game window.
+        Calls the Rust capture backend directly. Run events are applied to the
+        active session's database when one is open; otherwise they are only
+        logged here. Regions are percentages of the game window.
       </p>
 
       {error ? (

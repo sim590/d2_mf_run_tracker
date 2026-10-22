@@ -356,6 +356,24 @@ export async function cancelRun(runId: number, sessionId: number) {
   return activeSession;
 }
 
+export async function discardRun(runId: number, sessionId: number) {
+  const database = await getDatabase();
+
+  await database.execute("DELETE FROM runs WHERE id = ? AND ended_at IS NULL", [
+    runId,
+  ]);
+
+  const activeSession = await getActiveSession();
+
+  if (!activeSession || activeSession.id !== sessionId) {
+    throw new Error(
+      "Unable to refresh the active session after discarding the run.",
+    );
+  }
+
+  return activeSession;
+}
+
 export async function discardSession(sessionId: number) {
   await deleteSession(sessionId);
 }
