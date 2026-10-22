@@ -16,15 +16,18 @@ use serde::{Deserialize, Serialize};
 
 pub use capture::{CaptureBackend, GameWindowInfo, NormalizedRegion};
 pub use detector::{DetectorConfig, DetectorEvent, LoadingDetector, Phase};
-pub use menu_template::{MenuAnchorResult, MenuTemplateMatcher};
+pub use menu_template::{
+    menu_groups_visible, MenuAnchorGroup, MenuAnchorResult, MenuTemplateMatcher,
+};
 pub use x11::X11Backend;
 
-/// A single calibrated font-generated menu template. The live loop only runs
-/// this one template; the diagnostic search is not used per frame.
+/// One calibrated font-generated menu template. The live loop runs one
+/// template per anchor; the diagnostic search is not used per frame.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MenuTemplateConfig {
     pub region: NormalizedRegion,
     pub text: String,
+    pub group: String,
     pub font: String,
     pub size: f32,
     pub letter_spacing: f32,
@@ -36,7 +39,7 @@ pub struct MenuTemplateConfig {
 pub struct AutoDetectConfig {
     pub loading_region: NormalizedRegion,
     pub menu_region: Option<NormalizedRegion>,
-    pub menu_template: Option<MenuTemplateConfig>,
+    pub menu_templates: Vec<MenuTemplateConfig>,
     pub dark_threshold: f32,
     pub dark_samples: u32,
     pub bright_samples: u32,
@@ -52,7 +55,7 @@ impl Default for AutoDetectConfig {
         Self {
             loading_region: NormalizedRegion::default(),
             menu_region: None,
-            menu_template: None,
+            menu_templates: Vec::new(),
             dark_threshold: 22.0,
             dark_samples: 2,
             bright_samples: 2,
@@ -79,6 +82,15 @@ impl AutoDetectConfig {
     }
 }
 
+/// One anchor sampled by the live multi-anchor menu detector.
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveMenuAnchor {
+    pub text: String,
+    pub group: String,
+    pub score: f32,
+    pub visible: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AutoDetectStatus {
     pub running: bool,
@@ -86,6 +98,7 @@ pub struct AutoDetectStatus {
     pub last_brightness: Option<f32>,
     pub last_menu_brightness: Option<f32>,
     pub last_menu_score: Option<f32>,
+    pub last_menu_anchors: Vec<LiveMenuAnchor>,
     pub phase: String,
     pub last_error: Option<String>,
     pub last_event: Option<String>,
@@ -99,6 +112,7 @@ impl Default for AutoDetectStatus {
             last_brightness: None,
             last_menu_brightness: None,
             last_menu_score: None,
+            last_menu_anchors: Vec::new(),
             phase: Phase::Unknown.as_str().to_string(),
             last_error: None,
             last_event: None,

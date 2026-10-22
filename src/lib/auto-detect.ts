@@ -33,6 +33,7 @@ export type Preview = {
 export type MenuTemplateConfig = {
   region: NormalizedRegion;
   text: string;
+  group: string;
   font: string;
   size: number;
   letter_spacing: number;
@@ -42,7 +43,7 @@ export type MenuTemplateConfig = {
 export type AutoDetectConfig = {
   loading_region: NormalizedRegion;
   menu_region: NormalizedRegion | null;
-  menu_template: MenuTemplateConfig | null;
+  menu_templates: MenuTemplateConfig[];
   dark_threshold: number;
   dark_samples: number;
   bright_samples: number;
@@ -53,12 +54,20 @@ export type AutoDetectConfig = {
   min_run_seconds: number;
 };
 
+export type LiveMenuAnchor = {
+  text: string;
+  group: string;
+  score: number;
+  visible: boolean;
+};
+
 export type AutoDetectStatus = {
   running: boolean;
   window: GameWindowInfo | null;
   last_brightness: number | null;
   last_menu_brightness: number | null;
   last_menu_score: number | null;
+  last_menu_anchors: LiveMenuAnchor[];
   phase: string;
   last_error: string | null;
   last_event: string | null;
@@ -76,6 +85,7 @@ export type RunEndPayload = {
 
 export type MenuAnchorResult = {
   text: string;
+  group: string;
   font: string;
   score: number;
   ncc_score: number;
@@ -109,22 +119,51 @@ export const DEFAULT_MENU_REGION_PERCENT: RegionPercent = {
   height: 6.94,
 };
 
-// A text-only crop of the first left column button at 2560x1440. Adjust the
-// region and crop to a single anchor when testing.
-export const DEFAULT_MENU_ANCHOR_REGION_PERCENT: RegionPercent = {
-  x: 3,
-  y: 45.5,
-  width: 15,
-  height: 4,
-};
+export type MenuAnchorGroup = "left" | "center" | "right";
 
 export const MENU_ANCHOR_OPTIONS = [
   "CINÉMATIQUES",
   "CRÉDITS",
   "QUITTER DIABLO II",
+  "JOUER",
+  "CRÉER NOUVEAU",
 ] as const;
 
-export const DEFAULT_MENU_ANCHOR = MENU_ANCHOR_OPTIONS[0];
+export type MenuAnchorText = (typeof MENU_ANCHOR_OPTIONS)[number];
+
+export const MENU_ANCHOR_GROUPS: Record<MenuAnchorText, MenuAnchorGroup> = {
+  CINÉMATIQUES: "left",
+  CRÉDITS: "left",
+  "QUITTER DIABLO II": "left",
+  JOUER: "center",
+  "CRÉER NOUVEAU": "right",
+};
+
+// Starting points for 2560x1440. A text-only crop per anchor; adjust after
+// looking at the preview.
+export const DEFAULT_MENU_ANCHOR_REGIONS: Record<
+  MenuAnchorText,
+  RegionPercent
+> = {
+  CINÉMATIQUES: { x: 3, y: 45.5, width: 15, height: 4 },
+  CRÉDITS: { x: 3, y: 51, width: 15, height: 4 },
+  "QUITTER DIABLO II": { x: 3, y: 56.5, width: 15, height: 4 },
+  JOUER: { x: 43, y: 82, width: 14, height: 4 },
+  "CRÉER NOUVEAU": { x: 84, y: 81, width: 14, height: 4 },
+};
+
+export const DEFAULT_MENU_ANCHOR: MenuAnchorText = MENU_ANCHOR_OPTIONS[0];
+
+export function defaultMenuAnchorRegion(text: string): RegionPercent {
+  return (
+    DEFAULT_MENU_ANCHOR_REGIONS[text as MenuAnchorText] ??
+    DEFAULT_MENU_ANCHOR_REGIONS[DEFAULT_MENU_ANCHOR]
+  );
+}
+
+export function menuAnchorGroup(text: string): MenuAnchorGroup | null {
+  return MENU_ANCHOR_GROUPS[text as MenuAnchorText] ?? null;
+}
 
 export function percentToNormalized(region: RegionPercent): NormalizedRegion {
   return {

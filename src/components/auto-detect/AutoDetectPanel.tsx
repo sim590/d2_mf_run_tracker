@@ -10,16 +10,19 @@ import {
   type AutoDetectStatus,
   capturePreview,
   DEFAULT_MENU_ANCHOR,
-  DEFAULT_MENU_ANCHOR_REGION_PERCENT,
   DEFAULT_MENU_REGION_PERCENT,
   DEFAULT_REGION_PERCENT,
+  defaultMenuAnchorRegion,
   findGameWindow,
   type GameWindowInfo,
   getAutoDetectStatus,
+  type LiveMenuAnchor,
   listenRunEnd,
   listenRunStart,
   MENU_ANCHOR_OPTIONS,
+  type MenuAnchorResult,
   type MenuTemplateTest,
+  menuAnchorGroup,
   type Preview,
   percentToNormalized,
   type RegionPercent,
@@ -35,51 +38,119 @@ type LogEntry = {
   text: string;
 };
 
-type MenuCalibration = {
+type MenuAnchorCalibration = {
   region: RegionPercent;
   text: string;
+  group: string;
   font: string;
   size: number;
   letter_spacing: number;
-  score: number;
+  binary_score: number;
 };
 
-const MENU_CALIBRATION_STORAGE_KEY = "d2mf-menu-calibration-v1";
+type MenuCalibration = {
+  anchors: MenuAnchorCalibration[];
+};
+
+const MENU_CALIBRATION_STORAGE_KEY = "d2mf-menu-calibration-v2";
+const LEGACY_MENU_CALIBRATION_STORAGE_KEY = "d2mf-menu-calibration-v1";
+
+function isRegionPercent(value: unknown): value is RegionPercent {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const region = value as Partial<RegionPercent>;
+  return (
+    typeof region.x === "number" &&
+    typeof region.y === "number" &&
+    typeof region.width === "number" &&
+    typeof region.height === "number"
+  );
+}
+
+function parseAnchorCalibration(value: unknown): MenuAnchorCalibration | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const anchor = value as Partial<MenuAnchorCalibration>;
+  if (
+    typeof anchor.text !== "string" ||
+    typeof anchor.group !== "string" ||
+    typeof anchor.font !== "string" ||
+    !isRegionPercent(anchor.region) ||
+    typeof anchor.size !== "number" ||
+    typeof anchor.letter_spacing !== "number" ||
+    typeof anchor.binary_score !== "number"
+  ) {
+    return null;
+  }
+  return {
+    region: anchor.region,
+    text: anchor.text,
+    group: anchor.group,
+    font: anchor.font,
+    size: anchor.size,
+    letter_spacing: anchor.letter_spacing,
+    binary_score: anchor.binary_score,
+  };
+}
 
 function loadMenuCalibration(): MenuCalibration | null {
   try {
     const raw = window.localStorage.getItem(MENU_CALIBRATION_STORAGE_KEY);
-    if (!raw) {
+    if (raw) {
+      const parsed = JSON.parse(raw) as { anchors?: unknown } | null;
+      if (!parsed || !Array.isArray(parsed.anchors)) {
+        return null;
+      }
+      const anchors = parsed.anchors
+        .map(parseAnchorCalibration)
+        .filter((anchor): anchor is MenuAnchorCalibration => anchor !== null);
+      return anchors.length > 0 ? { anchors } : null;
+    }
+
+    // Migrate the old single-anchor calibration (combined score) as one left
+    // anchor, so CINÉMATIQUES is not lost.
+    const legacyRaw = window.localStorage.getItem(
+      LEGACY_MENU_CALIBRATION_STORAGE_KEY,
+    );
+    if (!legacyRaw) {
       return null;
     }
-    const parsed = JSON.parse(raw) as Partial<MenuCalibration> | null;
+    const legacy = JSON.parse(legacyRaw) as {
+      region?: unknown;
+      text?: unknown;
+      font?: unknown;
+      size?: unknown;
+      letter_spacing?: unknown;
+      score?: unknown;
+    } | null;
     if (
-      !parsed ||
-      typeof parsed.text !== "string" ||
-      typeof parsed.font !== "string" ||
-      !parsed.region ||
-      typeof parsed.region.x !== "number" ||
-      typeof parsed.region.y !== "number" ||
-      typeof parsed.region.width !== "number" ||
-      typeof parsed.region.height !== "number" ||
-      typeof parsed.size !== "number" ||
-      typeof parsed.letter_spacing !== "number"
+      !legacy ||
+      !isRegionPercent(legacy.region) ||
+      typeof legacy.text !== "string" ||
+      typeof legacy.font !== "string" ||
+      typeof legacy.size !== "number" ||
+      typeof legacy.letter_spacing !== "number"
     ) {
       return null;
     }
-    return {
-      region: {
-        x: parsed.region.x,
-        y: parsed.region.y,
-        width: parsed.region.width,
-        height: parsed.region.height,
-      },
-      text: parsed.text,
-      font: parsed.font,
-      size: parsed.size,
-      letter_spacing: parsed.letter_spacing,
-      score: typeof parsed.score === "number" ? parsed.score : 0,
+    const migrated: MenuCalibration = {
+      anchors: [
+        {
+          region: legacy.region,
+          text: legacy.text,
+          group: "left",
+          font: legacy.font,
+          size: legacy.size,
+          letter_spacing: legacy.letter_spacing,
+          binary_score: typeof legacy.score === "number" ? legacy.score : 0,
+        },
+      ],
     };
+    persistMenuCalibration(migrated);
+    window.localStorage.removeItem(LEGACY_MENU_CALIBRATION_STORAGE_KEY);
+    return migrated;
   } catch {
     return null;
   }
@@ -94,11 +165,69 @@ function persistMenuCalibration(calibration: MenuCalibration | null) {
       );
     } else {
       window.localStorage.removeItem(MENU_CALIBRATION_STORAGE_KEY);
+      window.localStorage.removeItem(LEGACY_MENU_CALIBRATION_STORAGE_KEY);
     }
   } catch {
     // localStorage may be unavailable; the calibration still works for this
     // app session.
   }
+}
+
+function isValidAnchorResult(result: MenuAnchorResult): boolean {
+  return result.size > 0 && result.binary_score >= 0.3;
+}
+
+function buildAnchorCalibration(
+  result: MenuAnchorResult,
+  region: RegionPercent,
+): MenuAnchorCalibration {
+  return {
+    region,
+    text: result.text,
+    group: result.group || menuAnchorGroup(result.text) || "left",
+    font: result.font,
+    size: result.size,
+    letter_spacing: result.letter_spacing,
+    binary_score: result.binary_score,
+  };
+}
+
+function mergeAnchorCalibration(
+  current: MenuCalibration | null,
+  additions: MenuAnchorCalibration[],
+): MenuCalibration {
+  const anchors = [...(current?.anchors ?? [])];
+  for (const addition of additions) {
+    const index = anchors.findIndex((anchor) => anchor.text === addition.text);
+    if (index >= 0) {
+      anchors[index] = addition;
+    } else {
+      anchors.push(addition);
+    }
+  }
+  return { anchors };
+}
+
+function formatLiveAnchors(anchors: LiveMenuAnchor[]): string {
+  if (anchors.length === 0) {
+    return "none";
+  }
+
+  const groups = ["left", "center", "right"] as const;
+  const parts = groups.map((group) => {
+    const groupAnchors = anchors.filter((anchor) => anchor.group === group);
+    if (groupAnchors.length === 0) {
+      return `${group} missing`;
+    }
+    const best = groupAnchors.reduce((current, entry) =>
+      entry.score > current.score ? entry : current,
+    );
+    return `${group} ${best.score.toFixed(2)} (${best.text})`;
+  });
+  const menuVisible = groups.every((group) =>
+    anchors.some((anchor) => anchor.group === group && anchor.visible),
+  );
+  return `${parts.join(", ")} -> ${menuVisible ? "menu" : "not menu"}`;
 }
 
 export function AutoDetectPanel() {
@@ -107,8 +236,8 @@ export function AutoDetectPanel() {
     DEFAULT_MENU_REGION_PERCENT,
   );
   const [menuEnabled, setMenuEnabled] = useState(true);
-  const [menuAnchorRegion, setMenuAnchorRegion] = useState<RegionPercent>(
-    DEFAULT_MENU_ANCHOR_REGION_PERCENT,
+  const [menuAnchorRegion, setMenuAnchorRegion] = useState<RegionPercent>(() =>
+    defaultMenuAnchorRegion(DEFAULT_MENU_ANCHOR),
   );
   const [menuAnchor, setMenuAnchor] = useState<string>(DEFAULT_MENU_ANCHOR);
   const [windowInfo, setWindowInfo] = useState<GameWindowInfo | null>(null);
@@ -262,61 +391,113 @@ export function AutoDetectPanel() {
     setMenuAnchorRegion((current) => ({ ...current, [key]: value }));
   };
 
+  const savedAnchorFor = (text: string) =>
+    menuCalibration?.anchors.find((anchor) => anchor.text === text) ?? null;
+
+  const regionForAnchor = (text: string): RegionPercent =>
+    savedAnchorFor(text)?.region ?? defaultMenuAnchorRegion(text);
+
+  const handleMenuAnchorChange = (value: string) => {
+    setMenuAnchor(value);
+    setMenuTemplateTest(null);
+    if (value === "all") {
+      return;
+    }
+    setMenuAnchorRegion(regionForAnchor(value));
+  };
+
   const handleTestMenuTemplates = () => {
     void runAction("test-menu-templates", async () => {
-      const allAnchors = menuAnchor === "all";
+      if (menuAnchor === "all") {
+        const results: MenuAnchorResult[] = [];
+        let window: GameWindowInfo | null = null;
+
+        for (const anchorText of MENU_ANCHOR_OPTIONS) {
+          const region = regionForAnchor(anchorText);
+          const result = await testMenuTemplates(
+            percentToNormalized(region),
+            anchorText,
+          );
+          results.push(...result.results);
+          window = result.window;
+        }
+
+        if (!window) {
+          return;
+        }
+        setMenuTemplateTest({ window, preview: "", results });
+        setWindowInfo(window);
+
+        const valid = results.filter(isValidAnchorResult);
+        const best =
+          valid.length > 0
+            ? valid.reduce((current, entry) =>
+                entry.binary_score > current.binary_score ? entry : current,
+              )
+            : null;
+        appendLog(
+          best
+            ? `all anchors: ${valid.length}/${MENU_ANCHOR_OPTIONS.length} valid, best ${best.text} binary ${best.binary_score.toFixed(3)}`
+            : `all anchors: 0/${MENU_ANCHOR_OPTIONS.length} valid`,
+        );
+        return;
+      }
+
       const result = await testMenuTemplates(
         percentToNormalized(menuAnchorRegion),
-        allAnchors ? null : menuAnchor,
+        menuAnchor,
       );
       setMenuTemplateTest(result);
       setWindowInfo(result.window);
-      const best =
-        result.results.length > 0
-          ? result.results.reduce((current, entry) =>
-              entry.score > current.score ? entry : current,
-            )
-          : null;
-      if (!best) {
-        appendLog("menu templates: no anchors tested");
-        return;
+      const best = result.results[0];
+      if (best) {
+        appendLog(
+          `${best.text} binary ${best.binary_score.toFixed(3)} (${best.font} ${best.size}px, ${best.letter_spacing}px spacing) at ${best.x},${best.y}`,
+        );
       }
-      const details = `${best.score.toFixed(3)} (${best.font || "none"} ${best.size}px, ${best.letter_spacing}px spacing) at ${best.x},${best.y}`;
-      appendLog(
-        allAnchors
-          ? `best of: ${best.text} ${details}`
-          : `${best.text} ${details}`,
-      );
     });
   };
 
-  const handleSaveMenuCalibration = () => {
-    if (!menuTemplateTest || menuTemplateTest.results.length === 0) {
+  const handleSaveMenuAnchor = () => {
+    if (menuAnchor === "all") {
+      return;
+    }
+    const result = menuTemplateTest?.results[0];
+    if (!result || !isValidAnchorResult(result)) {
       return;
     }
 
-    const candidate =
-      menuAnchor === "all"
-        ? menuTemplateTest.results.reduce((current, entry) =>
-            entry.score > current.score ? entry : current,
-          )
-        : menuTemplateTest.results[0];
-    if (!candidate || candidate.size <= 0 || candidate.binary_score < 0.3) {
-      return;
-    }
-
-    const calibration: MenuCalibration = {
-      region: menuAnchorRegion,
-      text: candidate.text,
-      font: candidate.font,
-      size: candidate.size,
-      letter_spacing: candidate.letter_spacing,
-      score: candidate.binary_score,
-    };
+    const calibration = mergeAnchorCalibration(menuCalibration, [
+      buildAnchorCalibration(result, menuAnchorRegion),
+    ]);
     setMenuCalibration(calibration);
     persistMenuCalibration(calibration);
     appendLog(
-      `menu calibration saved: ${calibration.text} ${calibration.font} ${calibration.size}px, ${calibration.letter_spacing}px spacing, binary ${calibration.score.toFixed(3)}`,
+      `menu calibration saved: ${result.text} ${result.font} ${result.size}px, binary ${result.binary_score.toFixed(3)}`,
+    );
+  };
+
+  const handleSaveAllMenuAnchors = () => {
+    const results = menuTemplateTest?.results ?? [];
+    const valid = results.filter(isValidAnchorResult);
+    if (valid.length === 0) {
+      setError("No anchor had a size and a binary score of at least 0.300.");
+      return;
+    }
+
+    const additions = valid.map((result) =>
+      buildAnchorCalibration(result, regionForAnchor(result.text)),
+    );
+    const calibration = mergeAnchorCalibration(menuCalibration, additions);
+    setMenuCalibration(calibration);
+    persistMenuCalibration(calibration);
+    appendLog(
+      `menu calibration saved: ${additions
+        .map(
+          (anchor) =>
+            `${anchor.group} ${anchor.text} ${anchor.binary_score.toFixed(3)}`,
+        )
+        .join(", ")}`,
     );
   };
 
@@ -332,26 +513,34 @@ export function AutoDetectPanel() {
       return;
     }
 
+    const calibrationAnchors = menuCalibration?.anchors ?? [];
+    const hasGroup = (group: string) =>
+      calibrationAnchors.some((anchor) => anchor.group === group);
+    const templateMenuReady =
+      hasGroup("left") && hasGroup("center") && hasGroup("right");
+    const menuTemplates = templateMenuReady
+      ? calibrationAnchors.map((anchor) => ({
+          region: percentToNormalized(anchor.region),
+          text: anchor.text,
+          group: anchor.group,
+          font: anchor.font,
+          size: anchor.size,
+          letter_spacing: anchor.letter_spacing,
+          threshold: 0.3,
+        }))
+      : [];
+
     void runAction("start", async () => {
       await startAutoDetect({
         loading_region: percentToNormalized(region),
         menu_region: menuEnabled ? percentToNormalized(menuRegion) : null,
-        menu_template: menuCalibration
-          ? {
-              region: percentToNormalized(menuCalibration.region),
-              text: menuCalibration.text,
-              font: menuCalibration.font,
-              size: menuCalibration.size,
-              letter_spacing: menuCalibration.letter_spacing,
-              threshold: 0.3,
-            }
-          : null,
+        menu_templates: menuTemplates,
         dark_threshold: 22,
         dark_samples: 2,
         bright_samples: 2,
         menu_threshold: 50,
         menu_samples: 2,
-        menu_dark_samples: menuCalibration ? 2 : 4,
+        menu_dark_samples: menuTemplates.length > 0 ? 2 : 4,
         poll_interval_ms: 250,
         min_run_seconds: 3,
       });
@@ -369,23 +558,29 @@ export function AutoDetectPanel() {
     });
   };
 
-  const bestMenuScore =
+  const bestMenuBinaryScore =
     menuTemplateTest && menuTemplateTest.results.length > 0
-      ? Math.max(...menuTemplateTest.results.map((result) => result.score))
+      ? Math.max(
+          ...menuTemplateTest.results.map((result) => result.binary_score),
+        )
       : 0;
 
-  const calibrationCandidate =
-    menuTemplateTest && menuTemplateTest.results.length > 0
-      ? menuAnchor === "all"
-        ? menuTemplateTest.results.reduce((current, entry) =>
-            entry.score > current.score ? entry : current,
-          )
-        : menuTemplateTest.results[0]
-      : null;
-  const canSaveCalibration =
-    calibrationCandidate !== null &&
-    calibrationCandidate.size > 0 &&
-    calibrationCandidate.binary_score >= 0.3;
+  const savedAnchors = menuCalibration?.anchors ?? [];
+  const savedGroups = new Set(savedAnchors.map((anchor) => anchor.group));
+  const missingGroups = (["left", "center", "right"] as const).filter(
+    (group) => !savedGroups.has(group),
+  );
+  const templateMenuReady = missingGroups.length === 0;
+
+  const singleResult =
+    menuAnchor === "all" ? null : (menuTemplateTest?.results[0] ?? null);
+  const canSaveSingle =
+    singleResult !== null && isValidAnchorResult(singleResult);
+  const validAllResults =
+    menuAnchor === "all"
+      ? (menuTemplateTest?.results ?? []).filter(isValidAnchorResult)
+      : [];
+  const canSaveAll = validAllResults.length > 0;
 
   return (
     <div className="tracker-screen">
@@ -576,12 +771,12 @@ export function AutoDetectPanel() {
         </div>
 
         <p className="text-sm text-muted-foreground">
-          Select one anchor and crop its text only (no neighbouring buttons) on
-          the character selection screen. The test renders it with both bundled
-          Exocet Blizzard weights at several sizes and letter spacings, then
-          scores intensity NCC, binary Dice and edge NCC inside the captured
-          region. Values are percentages of the game window; the default is a
-          text-only crop for 2560x1440.
+          Crop a single anchor text at a time (no neighbouring buttons). Each
+          anchor has its own default region at 2560x1440 and its own saved
+          region once calibrated. “All anchors” tests the five anchors
+          sequentially in their own regions, not all in one crop. Live menu
+          detection needs at least one visible left, one center and one right
+          anchor. Values are percentages of the game window.
         </p>
 
         <div className="space-y-1.5">
@@ -590,7 +785,7 @@ export function AutoDetectPanel() {
             className="h-10 w-full border border-input bg-background/80 px-3 text-sm text-foreground outline-none focus-visible:border-ring"
             id="menu-anchor-select"
             value={menuAnchor}
-            onChange={(event) => setMenuAnchor(event.target.value)}
+            onChange={(event) => handleMenuAnchorChange(event.target.value)}
           >
             {MENU_ANCHOR_OPTIONS.map((option) => (
               <option key={option} value={option}>
@@ -607,6 +802,7 @@ export function AutoDetectPanel() {
               <Label htmlFor={`menu-anchor-region-${key}`}>{key} (%)</Label>
               <Input
                 className="h-10 text-sm"
+                disabled={menuAnchor === "all"}
                 id={`menu-anchor-region-${key}`}
                 max={100}
                 min={key === "width" || key === "height" ? 0.1 : 0}
@@ -633,15 +829,15 @@ export function AutoDetectPanel() {
           </Button>
           {menuTemplateTest ? (
             <span className="text-sm text-muted-foreground">
-              Best score: {bestMenuScore.toFixed(3)}
+              Best binary score: {bestMenuBinaryScore.toFixed(3)}
             </span>
           ) : null}
         </div>
 
         <p className="text-xs text-muted-foreground">
-          Testing alone does not change run detection. Saving a calibration
-          switches the menu boundary to this binary template; the brightness
-          menu probe stays as a fallback.
+          Testing alone does not change run detection. Saving anchors switches
+          the menu boundary to the binary template; the brightness menu probe
+          stays as a fallback.
         </p>
 
         {menuTemplateTest ? (
@@ -649,7 +845,8 @@ export function AutoDetectPanel() {
             <div className="grid gap-2 sm:grid-cols-3">
               {menuTemplateTest.results.map((result) => {
                 const isBest =
-                  result.score > 0 && result.score === bestMenuScore;
+                  result.binary_score > 0 &&
+                  result.binary_score === bestMenuBinaryScore;
                 return (
                   <div
                     key={result.text}
@@ -676,8 +873,8 @@ export function AutoDetectPanel() {
                     {result.size > 0 ? (
                       <>
                         <div className="text-xs text-muted-foreground">
-                          {result.font} font, {result.size}px,{" "}
-                          {result.letter_spacing}px spacing
+                          {result.group || "unknown"} - {result.font} font,{" "}
+                          {result.size}px, {result.letter_spacing}px spacing
                         </div>
                         <div className="grid grid-cols-3 gap-1 font-mono text-xs text-muted-foreground">
                           <span>ncc {result.ncc_score.toFixed(3)}</span>
@@ -708,30 +905,45 @@ export function AutoDetectPanel() {
             ) : null}
 
             <div className="flex flex-wrap items-center gap-3">
-              <Button
-                className="tracker-action-primary"
-                disabled={!canSaveCalibration}
-                onClick={handleSaveMenuCalibration}
-              >
-                Use as menu calibration
-              </Button>
-              {canSaveCalibration && calibrationCandidate ? (
-                <span className="text-xs text-muted-foreground">
-                  Saves {calibrationCandidate.text} ({calibrationCandidate.font}{" "}
-                  {calibrationCandidate.size}px,{" "}
-                  {calibrationCandidate.letter_spacing}px spacing, binary{" "}
-                  {calibrationCandidate.binary_score.toFixed(3)}).
-                </span>
+              {menuAnchor === "all" ? (
+                <>
+                  <Button
+                    className="tracker-action-primary"
+                    disabled={!canSaveAll}
+                    onClick={handleSaveAllMenuAnchors}
+                  >
+                    Save all valid anchors
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    {canSaveAll
+                      ? `${validAllResults.length}/${MENU_ANCHOR_OPTIONS.length} anchors have a size and a binary score of at least 0.300.`
+                      : "No anchor has a size and a binary score of at least 0.300."}
+                  </span>
+                </>
               ) : (
-                <span className="text-xs text-muted-foreground">
-                  Need a result with a size and a binary score of at least 0.300
-                  {calibrationCandidate && calibrationCandidate.size > 0
-                    ? ` (currently ${calibrationCandidate.binary_score.toFixed(3)})`
-                    : ""}
-                  .
-                </span>
+                <>
+                  <Button
+                    className="tracker-action-primary"
+                    disabled={!canSaveSingle}
+                    onClick={handleSaveMenuAnchor}
+                  >
+                    Save this anchor
+                  </Button>
+                  <span className="text-xs text-muted-foreground">
+                    {canSaveSingle && singleResult
+                      ? `Saves ${singleResult.text} (${singleResult.group}) with binary ${singleResult.binary_score.toFixed(3)}.`
+                      : "Need a size and a binary score of at least 0.300."}
+                  </span>
+                </>
               )}
             </div>
+
+            {menuAnchor === "all" ? (
+              <p className="text-xs text-muted-foreground">
+                Each anchor was tested in its own region. Run a single anchor to
+                see its preview.
+              </p>
+            ) : null}
           </div>
         ) : null}
 
@@ -759,28 +971,35 @@ export function AutoDetectPanel() {
           </div>
           {menuCalibration ? (
             <>
-              <div className="text-sm text-muted-foreground">
-                {menuCalibration.text} - {menuCalibration.font}{" "}
-                {menuCalibration.size}px, {menuCalibration.letter_spacing}px
-                spacing, binary score {menuCalibration.score.toFixed(3)}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                region x {menuCalibration.region.x}%, y{" "}
-                {menuCalibration.region.y}%, width{" "}
-                {menuCalibration.region.width}%, height{" "}
-                {menuCalibration.region.height}%
-              </div>
+              {(["left", "center", "right"] as const).map((group) => {
+                const entries = savedAnchors.filter(
+                  (anchor) => anchor.group === group,
+                );
+                return (
+                  <div key={group} className="text-xs text-muted-foreground">
+                    <span className="font-mono uppercase">{group}</span>:{" "}
+                    {entries.length > 0
+                      ? entries
+                          .map(
+                            (anchor) =>
+                              `${anchor.text} binary ${anchor.binary_score.toFixed(3)} (${anchor.font} ${anchor.size}px, ${anchor.letter_spacing}px spacing) @ ${anchor.region.x}/${anchor.region.y}/${anchor.region.width}x${anchor.region.height}%`,
+                          )
+                          .join(" | ")
+                      : "missing"}
+                  </div>
+                );
+              })}
               <p className="text-xs text-muted-foreground">
-                Live menu detection uses the binary Dice score with threshold
-                0.3 over two frames. The brightness menu probe is only a
-                fallback.
+                {templateMenuReady
+                  ? "Template menu detection is active: at least one visible anchor in each group is required. Live threshold: binary 0.300 over two frames."
+                  : `Template menu detection needs one left, one center and one right anchor. Missing: ${missingGroups.join(", ")}. The brightness menu probe is used meanwhile.`}
               </p>
             </>
           ) : (
             <p className="text-xs text-muted-foreground">
-              Without a calibration, the brightness menu region is used. Save a
-              successful test above to switch the menu boundary to the binary
-              template.
+              Without a calibration, the brightness menu region is used. Save at
+              least one anchor in each of the left, center and right groups to
+              switch the menu boundary to the binary template.
             </p>
           )}
         </div>
@@ -823,6 +1042,9 @@ export function AutoDetectPanel() {
             Menu template score: {status?.last_menu_score?.toFixed(3) ?? "none"}
           </div>
           <div>Last event: {status?.last_event ?? "none"}</div>
+          <div className="sm:col-span-2">
+            Menu anchors: {formatLiveAnchors(status?.last_menu_anchors ?? [])}
+          </div>
           <div className="sm:col-span-2">
             Last error: {status?.last_error ?? "none"}
           </div>

@@ -9,9 +9,10 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 mod auto_detect;
 
 use auto_detect::{
-    AutoDetectConfig, AutoDetectStatus, CaptureBackend, DetectorEvent, GameWindowInfo,
-    LoadingDetector, MenuTemplateMatcher, MenuTemplateTest, NormalizedRegion, Preview,
-    RunEndPayload, RunStartPayload, X11Backend,
+    menu_groups_visible, AutoDetectConfig, AutoDetectStatus, CaptureBackend, DetectorEvent,
+    GameWindowInfo, LiveMenuAnchor, LoadingDetector, MenuAnchorGroup, MenuTemplateConfig,
+    MenuTemplateMatcher, MenuTemplateTest, NormalizedRegion, Preview, RunEndPayload,
+    RunStartPayload, X11Backend,
 };
 
 struct AutoDetectHandle {
@@ -245,6 +246,12 @@ fn menu_brightness_probe(
     }
 }
 
+struct ActiveMenuTemplate {
+    config: MenuTemplateConfig,
+    matcher: MenuTemplateMatcher,
+    group: MenuAnchorGroup,
+}
+
 fn run_auto_detect(
     app: tauri::AppHandle,
     config: AutoDetectConfig,
@@ -272,26 +279,36 @@ fn run_auto_detect(
     let mut error_count = 0u32;
     let mut last_window_refresh = Instant::now();
 
-    let mut matcher_error: Option<String> = None;
-    let menu_matcher = match config.menu_template.as_ref() {
-        Some(template) => match MenuTemplateMatcher::new(
+    let mut template_config_error: Option<String> = None;
+    let mut menu_templates: Vec<ActiveMenuTemplate> = Vec::new();
+    for template in &config.menu_templates {
+        let Some(group) = MenuAnchorGroup::parse(&template.group) else {
+            let message = format!(
+                "menu template '{}' has an invalid group '{}'; skipping it",
+                template.text, template.group
+            );
+            set_status_error(&status, message.clone());
+            template_config_error.get_or_insert(message);
+            continue;
+        };
+        match MenuTemplateMatcher::new(
             &template.text,
             &template.font,
             template.size,
             template.letter_spacing,
         ) {
-            Some(matcher) => Some(matcher),
+            Some(matcher) => menu_templates.push(ActiveMenuTemplate {
+                config: template.clone(),
+                matcher,
+                group,
+            }),
             None => {
-                let message =
-                    "menu template calibration is invalid; using the brightness menu probe"
-                        .to_string();
+                let message = format!("menu template '{}' is invalid; skipping it", template.text);
                 set_status_error(&status, message.clone());
-                matcher_error = Some(message);
-                None
+                template_config_error.get_or_insert(message);
             }
-        },
-        None => None,
-    };
+        }
+    }
 
     while !stop.load(Ordering::Relaxed) {
         if last_window_refresh.elapsed() >= Duration::from_secs(5) {
@@ -305,47 +322,87 @@ fn run_auto_detect(
             Ok(image) => {
                 error_count = 0;
                 let brightness = image.mean_brightness();
-                let (menu_signal, status_menu_brightness, last_menu_score, probe_error) = match (
-                    config.menu_template.as_ref(),
-                    menu_matcher.as_ref(),
-                ) {
-                    (Some(template), Some(matcher)) => {
-                        let menu_pixels = template.region.to_pixels(&window);
+                let (
+                    menu_signal,
+                    status_menu_brightness,
+                    last_menu_score,
+                    last_menu_anchors,
+                    probe_error,
+                ) = if menu_templates.is_empty() {
+                    let (brightness, error) =
+                        menu_brightness_probe(&backend, &window, config.menu_region);
+                    (brightness, brightness, None, Vec::new(), error)
+                } else {
+                    let mut anchors = Vec::with_capacity(menu_templates.len());
+                    let mut capture_errors = Vec::new();
+                    let mut left_visible = false;
+                    let mut center_visible = false;
+                    let mut right_visible = false;
+                    let mut captured_any = false;
+                    let mut max_score = 0.0_f32;
+
+                    for template in &menu_templates {
+                        let menu_pixels = template.config.region.to_pixels(&window);
                         match backend.capture_region(&window, menu_pixels) {
                             Ok(menu_image) => {
-                                let score = matcher.score(&menu_image.to_luma8());
-                                let visible = score >= template.threshold;
-                                (
-                                    Some(if visible { 100.0 } else { 0.0 }),
-                                    None,
-                                    Some(score),
-                                    None,
-                                )
+                                captured_any = true;
+                                let score = template.matcher.score(&menu_image.to_luma8());
+                                let visible = score >= template.config.threshold;
+                                max_score = max_score.max(score);
+                                match template.group {
+                                    MenuAnchorGroup::Left => left_visible |= visible,
+                                    MenuAnchorGroup::Center => center_visible |= visible,
+                                    MenuAnchorGroup::Right => right_visible |= visible,
+                                }
+                                anchors.push(LiveMenuAnchor {
+                                    text: template.config.text.clone(),
+                                    group: template.group.as_str().to_string(),
+                                    score,
+                                    visible,
+                                });
                             }
                             Err(error) => {
-                                // Do not drop menu detection for a frame if
-                                // the calibrated crop cannot be captured.
-                                let (brightness, fallback_error) =
-                                    menu_brightness_probe(&backend, &window, config.menu_region);
-                                let message = match fallback_error {
-                                        Some(fallback) => format!(
-                                            "menu template capture failed: {error}; brightness fallback failed: {fallback}"
-                                        ),
-                                        None => format!(
-                                            "menu template capture failed: {error}; using brightness fallback"
-                                        ),
-                                    };
-                                (brightness, brightness, None, Some(message))
+                                // Skip this anchor for the frame; the other
+                                // groups may still be captured.
+                                capture_errors.push(format!("{}: {error}", template.config.text));
                             }
                         }
                     }
-                    _ => {
-                        let (brightness, error) =
+
+                    if captured_any {
+                        let menu_visible =
+                            menu_groups_visible(left_visible, center_visible, right_visible);
+                        let error = if capture_errors.is_empty() {
+                            None
+                        } else {
+                            Some(format!(
+                                "menu template capture failed for {}",
+                                capture_errors.join("; ")
+                            ))
+                        };
+                        (
+                            Some(if menu_visible { 100.0 } else { 0.0 }),
+                            None,
+                            Some(max_score),
+                            anchors,
+                            error,
+                        )
+                    } else {
+                        let (brightness, fallback_error) =
                             menu_brightness_probe(&backend, &window, config.menu_region);
-                        (brightness, brightness, None, error)
+                        let mut message = format!(
+                            "no menu template region could be captured ({})",
+                            capture_errors.join("; ")
+                        );
+                        if let Some(fallback) = fallback_error {
+                            message.push_str(&format!("; brightness fallback failed: {fallback}"));
+                        } else {
+                            message.push_str("; using brightness fallback");
+                        }
+                        (brightness, brightness, None, Vec::new(), Some(message))
                     }
                 };
-                let menu_error = probe_error.or_else(|| matcher_error.clone());
+                let menu_error = probe_error.or_else(|| template_config_error.clone());
                 let events = detector.process_with_menu(brightness, menu_signal, Instant::now());
                 let phase = detector.phase().as_str().to_string();
 
@@ -355,6 +412,7 @@ fn run_auto_detect(
                     current.last_brightness = Some(brightness);
                     current.last_menu_brightness = status_menu_brightness;
                     current.last_menu_score = last_menu_score;
+                    current.last_menu_anchors = last_menu_anchors;
                     current.phase = phase;
                     current.last_error = menu_error;
                 });

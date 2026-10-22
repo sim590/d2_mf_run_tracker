@@ -16,9 +16,58 @@ use serde::Serialize;
 static MEDIUM_BYTES: &[u8] = include_bytes!("../../../src/assets/exocet-blizzard-medium.ttf");
 static HEAVY_BYTES: &[u8] = include_bytes!("../../../src/assets/exocet-blizzard-heavy.ttf");
 
-/// Left column buttons on the character selection screen. The strings are
-/// unique to that screen (unlike OPTIONS, which the pause menu also shows).
-pub const MENU_ANCHORS: [&str; 3] = ["CINÉMATIQUES", "CRÉDITS", "QUITTER DIABLO II"];
+/// Menu buttons used for detection. The left column strings are unique to the
+/// character selection screen (unlike OPTIONS, which the pause menu shows).
+pub const MENU_ANCHORS: [&str; 5] = [
+    "CINÉMATIQUES",
+    "CRÉDITS",
+    "QUITTER DIABLO II",
+    "JOUER",
+    "CRÉER NOUVEAU",
+];
+
+/// The three screen regions that must all show a menu anchor before the menu
+/// is considered visible. A tooltip can overlap one region by chance, but not
+/// all three at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuAnchorGroup {
+    Left,
+    Center,
+    Right,
+}
+
+impl MenuAnchorGroup {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MenuAnchorGroup::Left => "left",
+            MenuAnchorGroup::Center => "center",
+            MenuAnchorGroup::Right => "right",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "left" => Some(MenuAnchorGroup::Left),
+            "center" | "centre" => Some(MenuAnchorGroup::Center),
+            "right" => Some(MenuAnchorGroup::Right),
+            _ => None,
+        }
+    }
+
+    pub fn for_anchor(text: &str) -> Option<Self> {
+        match text {
+            "CINÉMATIQUES" | "CRÉDITS" | "QUITTER DIABLO II" => Some(MenuAnchorGroup::Left),
+            "JOUER" => Some(MenuAnchorGroup::Center),
+            "CRÉER NOUVEAU" => Some(MenuAnchorGroup::Right),
+            _ => None,
+        }
+    }
+}
+
+/// All three groups must have at least one visible anchor.
+pub fn menu_groups_visible(left: bool, center: bool, right: bool) -> bool {
+    left && center && right
+}
 
 const SIZES: [f32; 10] = [16.0, 18.0, 20.0, 22.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0];
 const LETTER_SPACINGS: [f32; 4] = [0.0, 1.0, 2.0, 3.0];
@@ -70,6 +119,7 @@ impl FontKind {
 #[derive(Debug, Clone, Serialize)]
 pub struct MenuAnchorResult {
     pub text: String,
+    pub group: String,
     pub font: String,
     /// Combined score: the best of the intensity, binary and edge scores.
     pub score: f32,
@@ -88,6 +138,9 @@ impl MenuAnchorResult {
     fn empty(text: &str) -> Self {
         Self {
             text: text.to_string(),
+            group: MenuAnchorGroup::for_anchor(text)
+                .map(|group| group.as_str().to_string())
+                .unwrap_or_default(),
             font: String::new(),
             score: 0.0,
             ncc_score: 0.0,
@@ -729,6 +782,9 @@ fn best_for_anchor(
         if scores.combined > best.score {
             best = MenuAnchorResult {
                 text: text.to_string(),
+                group: MenuAnchorGroup::for_anchor(text)
+                    .map(|group| group.as_str().to_string())
+                    .unwrap_or_default(),
                 font: candidate.font.as_str().to_string(),
                 score: scores.combined,
                 ncc_score: scores.ncc,
@@ -810,9 +866,25 @@ impl MenuTemplateMatcher {
         let context = SearchContext::new_binary(search);
         let max_x = search.width() - self.template.width;
         let max_y = search.height() - self.template.height;
+        let template_count = self.template.binary_count as f64;
         let mut best = 0.0_f32;
+
         for y in 0..=max_y {
             for x in 0..=max_x {
+                // Upper bound on Dice: intersection can never exceed the
+                // smaller of the two on-pixel counts. This skips most dark or
+                // weakly lit positions before walking the template mask.
+                let search_count =
+                    context.binary_sum(x, y, self.template.width, self.template.height);
+                if search_count == 0 {
+                    continue;
+                }
+                let max_dice = 2.0 * search_count.min(self.template.binary_count) as f64
+                    / (template_count + search_count as f64);
+                if max_dice <= f64::from(best) {
+                    continue;
+                }
+
                 let score = self.template.binary_score_at(&context, x, y);
                 if score > best {
                     best = score;
@@ -959,6 +1031,65 @@ mod tests {
     }
 
     #[test]
+    fn menu_anchor_groups_map_correctly() {
+        assert_eq!(
+            MenuAnchorGroup::for_anchor("CINÉMATIQUES"),
+            Some(MenuAnchorGroup::Left)
+        );
+        assert_eq!(
+            MenuAnchorGroup::for_anchor("CRÉDITS"),
+            Some(MenuAnchorGroup::Left)
+        );
+        assert_eq!(
+            MenuAnchorGroup::for_anchor("QUITTER DIABLO II"),
+            Some(MenuAnchorGroup::Left)
+        );
+        assert_eq!(
+            MenuAnchorGroup::for_anchor("JOUER"),
+            Some(MenuAnchorGroup::Center)
+        );
+        assert_eq!(
+            MenuAnchorGroup::for_anchor("CRÉER NOUVEAU"),
+            Some(MenuAnchorGroup::Right)
+        );
+        assert_eq!(MenuAnchorGroup::for_anchor("OPTIONS"), None);
+
+        assert_eq!(MenuAnchorGroup::parse("LEFT"), Some(MenuAnchorGroup::Left));
+        assert_eq!(
+            MenuAnchorGroup::parse("centre"),
+            Some(MenuAnchorGroup::Center)
+        );
+        assert_eq!(
+            MenuAnchorGroup::parse("right"),
+            Some(MenuAnchorGroup::Right)
+        );
+        assert_eq!(MenuAnchorGroup::parse("somewhere"), None);
+    }
+
+    #[test]
+    fn menu_visibility_requires_all_three_groups() {
+        assert!(!menu_groups_visible(false, false, false));
+        assert!(!menu_groups_visible(true, false, false));
+        assert!(!menu_groups_visible(true, false, true));
+        assert!(!menu_groups_visible(false, true, true));
+        assert!(menu_groups_visible(true, true, true));
+    }
+
+    #[test]
+    fn matcher_scores_every_menu_anchor() {
+        for text in MENU_ANCHORS {
+            let template = render_menu_text(text, 20.0, 1.0, FontKind::Medium);
+            let mut search = GrayImage::from_pixel(384, 58, Luma([0]));
+            paste(&mut search, &template, 40, 15);
+
+            let matcher =
+                MenuTemplateMatcher::new(text, "medium", 20.0, 1.0).expect("valid matcher");
+            let score = matcher.score(&search);
+            assert!(score > 0.9, "{text} scored {score}");
+        }
+    }
+
+    #[test]
     fn matcher_blank_search_scores_low() {
         let search = GrayImage::from_pixel(384, 58, Luma([0]));
         let matcher =
@@ -1016,6 +1147,15 @@ mod tests {
         let one = test_menu_templates(&search, Some("CRÉDITS"));
         assert_eq!(one.len(), 1);
         assert_eq!(one[0].text, "CRÉDITS");
+        assert_eq!(one[0].group, "left");
+
+        let center = test_menu_templates(&search, Some("JOUER"));
+        assert_eq!(center.len(), 1);
+        assert_eq!(center[0].group, "center");
+
+        let right = test_menu_templates(&search, Some("CRÉER NOUVEAU"));
+        assert_eq!(right.len(), 1);
+        assert_eq!(right[0].group, "right");
 
         let all = test_menu_templates(&search, None);
         assert_eq!(all.len(), MENU_ANCHORS.len());
