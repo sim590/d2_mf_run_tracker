@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 
@@ -21,6 +22,7 @@ import {
   startAutoDetect,
   stopAutoDetect,
 } from "@/lib/auto-detect";
+import { type ActiveSession, getActiveSession } from "@/lib/tracker-db";
 import { AUTO_DETECT_STOPPED_EVENT } from "@/lib/tracker-events";
 
 type LogEntry = {
@@ -38,6 +40,9 @@ export function AutoDetectPanel() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [menuPreview, setMenuPreview] = useState<Preview | null>(null);
   const [status, setStatus] = useState<AutoDetectStatus | null>(null);
+  const [activeSession, setActiveSession] = useState<ActiveSession | null>(
+    null,
+  );
   const [log, setLog] = useState<LogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -98,9 +103,13 @@ export function AutoDetectPanel() {
 
     const refresh = async () => {
       try {
-        const next = await getAutoDetectStatus();
+        const [nextStatus, nextSession] = await Promise.all([
+          getAutoDetectStatus(),
+          getActiveSession(),
+        ]);
         if (!cancelled) {
-          setStatus(next);
+          setStatus(nextStatus);
+          setActiveSession(nextSession);
         }
       } catch (err) {
         if (!cancelled) {
@@ -171,6 +180,13 @@ export function AutoDetectPanel() {
   };
 
   const handleStart = () => {
+    if (!activeSession) {
+      setError(
+        "Start a session and click Start Run before enabling auto-detect.",
+      );
+      return;
+    }
+
     void runAction("start", async () => {
       await startAutoDetect({
         loading_region: percentToNormalized(region),
@@ -207,6 +223,23 @@ export function AutoDetectPanel() {
         active session's database when one is open; otherwise they are only
         logged here. Regions are percentages of the game window.
       </p>
+
+      {activeSession ? (
+        <p className="text-sm text-muted-foreground">
+          Active session: {activeSession.locationName}
+        </p>
+      ) : (
+        <div className="border border-amber-500/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
+          <p>
+            No active session. The session screen is only a draft until you
+            click <strong>Start Run</strong>; until then, run events are logged
+            here but are not written to the database.
+          </p>
+          <Button asChild className="tracker-action-secondary mt-2">
+            <Link to="/new-session">Start a session</Link>
+          </Button>
+        </div>
+      )}
 
       {error ? (
         <div className="border border-destructive/60 bg-destructive/10 px-4 py-3 text-sm text-destructive">
@@ -367,7 +400,9 @@ export function AutoDetectPanel() {
           <div className="flex gap-2">
             <Button
               className="tracker-action-primary"
-              disabled={busy !== null || status?.running === true}
+              disabled={
+                busy !== null || status?.running === true || !activeSession
+              }
               onClick={handleStart}
             >
               Start
