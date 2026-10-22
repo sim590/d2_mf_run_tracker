@@ -11,6 +11,8 @@ pub struct DetectorConfig {
     pub dark_threshold: f32,
     pub dark_samples: u32,
     pub bright_samples: u32,
+    pub menu_threshold: f32,
+    pub menu_samples: u32,
     pub min_run_duration: Duration,
 }
 
@@ -20,6 +22,8 @@ impl Default for DetectorConfig {
             dark_threshold: 22.0,
             dark_samples: 2,
             bright_samples: 2,
+            menu_threshold: 50.0,
+            menu_samples: 2,
             min_run_duration: Duration::from_secs(3),
         }
     }
@@ -28,6 +32,7 @@ impl Default for DetectorConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     Unknown,
+    Menu,
     InGame,
     Loading,
 }
@@ -36,6 +41,7 @@ impl Phase {
     pub fn as_str(self) -> &'static str {
         match self {
             Phase::Unknown => "unknown",
+            Phase::Menu => "menu",
             Phase::InGame => "in-game",
             Phase::Loading => "loading",
         }
@@ -53,6 +59,7 @@ pub struct LoadingDetector {
     phase: Phase,
     dark_streak: u32,
     bright_streak: u32,
+    menu_streak: u32,
     run_started_at: Option<Instant>,
 }
 
@@ -63,6 +70,7 @@ impl LoadingDetector {
             phase: Phase::Unknown,
             dark_streak: 0,
             bright_streak: 0,
+            menu_streak: 0,
             run_started_at: None,
         }
     }
@@ -71,11 +79,48 @@ impl LoadingDetector {
         self.phase
     }
 
-    /// Feed one brightness sample (0.0 to 255.0) and return the resulting
-    /// events. The first dark-to-bright cycle starts a run; the next dark
-    /// cycle ends it.
+    /// Feed one loading-probe brightness sample. Menu detection is disabled.
+    #[cfg(test)]
     pub fn process(&mut self, brightness: f32, now: Instant) -> Vec<DetectorEvent> {
+        self.process_with_menu(brightness, None, now)
+    }
+
+    /// Feed the loading probe and, when configured, the menu probe.
+    ///
+    /// A bright menu probe has priority: it ends an active run and keeps the
+    /// detector in the Menu phase until a loading screen starts a new game.
+    pub fn process_with_menu(
+        &mut self,
+        brightness: f32,
+        menu_brightness: Option<f32>,
+        now: Instant,
+    ) -> Vec<DetectorEvent> {
         let mut events = Vec::new();
+
+        if let Some(menu_brightness) = menu_brightness {
+            if menu_brightness >= self.config.menu_threshold {
+                self.menu_streak = self.menu_streak.saturating_add(1);
+                if self.menu_streak >= self.config.menu_samples.max(1) && self.phase != Phase::Menu
+                {
+                    if let Some(started_at) = self.run_started_at.take() {
+                        let duration = now.saturating_duration_since(started_at);
+                        events.push(DetectorEvent::RunEnd {
+                            duration,
+                            too_short: duration < self.config.min_run_duration,
+                        });
+                    }
+                    self.phase = Phase::Menu;
+                    self.dark_streak = 0;
+                    self.bright_streak = 0;
+                }
+                // Wait for menu confirmation. A bright menu frame must not
+                // start a run through the loading probe.
+                return events;
+            }
+            self.menu_streak = 0;
+        } else {
+            self.menu_streak = 0;
+        }
 
         if brightness <= self.config.dark_threshold {
             self.bright_streak = 0;
@@ -112,7 +157,7 @@ impl LoadingDetector {
                         }
                     }
                 }
-                Phase::InGame => {}
+                Phase::InGame | Phase::Menu => {}
             }
         }
 
@@ -130,6 +175,8 @@ mod tests {
             dark_threshold: 22.0,
             dark_samples: 2,
             bright_samples: 2,
+            menu_threshold: 50.0,
+            menu_samples: 2,
             min_run_duration: Duration::from_secs(3),
         })
     }
@@ -254,6 +301,68 @@ mod tests {
         assert!(detector.process(100.0, at(base, 1250)).is_empty());
         assert_eq!(
             detector.process(100.0, at(base, 1500)),
+            vec![DetectorEvent::RunStart]
+        );
+    }
+
+    #[test]
+    fn menu_probe_enters_menu_without_starting_a_run() {
+        let mut detector = detector();
+        let base = Instant::now();
+        assert!(detector
+            .process_with_menu(100.0, Some(88.0), at(base, 0))
+            .is_empty());
+        assert!(detector
+            .process_with_menu(100.0, Some(88.0), at(base, 250))
+            .is_empty());
+        assert_eq!(detector.phase(), Phase::Menu);
+        assert!(detector
+            .process_with_menu(100.0, Some(88.0), at(base, 500))
+            .is_empty());
+    }
+
+    #[test]
+    fn menu_probe_ends_active_run() {
+        let mut detector = detector();
+        let base = Instant::now();
+        detector.process_with_menu(100.0, Some(0.0), at(base, 0));
+        detector.process_with_menu(100.0, Some(0.0), at(base, 250));
+        detector.process_with_menu(0.0, Some(0.0), at(base, 500));
+        detector.process_with_menu(0.0, Some(0.0), at(base, 750));
+        detector.process_with_menu(100.0, Some(0.0), at(base, 1000));
+        assert_eq!(
+            detector.process_with_menu(100.0, Some(0.0), at(base, 1250)),
+            vec![DetectorEvent::RunStart]
+        );
+
+        assert!(detector
+            .process_with_menu(100.0, Some(88.0), at(base, 4000))
+            .is_empty());
+        assert_eq!(
+            detector.process_with_menu(100.0, Some(88.0), at(base, 4250)),
+            vec![DetectorEvent::RunEnd {
+                duration: Duration::from_millis(3000),
+                too_short: false,
+            }]
+        );
+        assert_eq!(detector.phase(), Phase::Menu);
+    }
+
+    #[test]
+    fn menu_then_loading_starts_a_run() {
+        let mut detector = detector();
+        let base = Instant::now();
+        detector.process_with_menu(100.0, Some(88.0), at(base, 0));
+        detector.process_with_menu(100.0, Some(88.0), at(base, 250));
+        assert_eq!(detector.phase(), Phase::Menu);
+
+        detector.process_with_menu(0.0, Some(0.0), at(base, 500));
+        detector.process_with_menu(0.0, Some(0.0), at(base, 750));
+        assert_eq!(detector.phase(), Phase::Loading);
+
+        detector.process_with_menu(100.0, Some(0.0), at(base, 1000));
+        assert_eq!(
+            detector.process_with_menu(100.0, Some(0.0), at(base, 1250)),
             vec![DetectorEvent::RunStart]
         );
     }

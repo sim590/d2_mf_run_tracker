@@ -21,9 +21,12 @@ pub use x11::X11Backend;
 #[serde(default)]
 pub struct AutoDetectConfig {
     pub loading_region: Region,
+    pub menu_region: Option<Region>,
     pub dark_threshold: f32,
     pub dark_samples: u32,
     pub bright_samples: u32,
+    pub menu_threshold: f32,
+    pub menu_samples: u32,
     pub poll_interval_ms: u64,
     pub min_run_seconds: f64,
 }
@@ -32,9 +35,12 @@ impl Default for AutoDetectConfig {
     fn default() -> Self {
         Self {
             loading_region: Region::default(),
+            menu_region: None,
             dark_threshold: 22.0,
             dark_samples: 2,
             bright_samples: 2,
+            menu_threshold: 50.0,
+            menu_samples: 2,
             poll_interval_ms: 250,
             min_run_seconds: 3.0,
         }
@@ -47,6 +53,8 @@ impl AutoDetectConfig {
             dark_threshold: self.dark_threshold,
             dark_samples: self.dark_samples.max(1),
             bright_samples: self.bright_samples.max(1),
+            menu_threshold: self.menu_threshold,
+            menu_samples: self.menu_samples.max(1),
             min_run_duration: Duration::from_secs_f64(self.min_run_seconds.max(0.0)),
         }
     }
@@ -57,6 +65,7 @@ pub struct AutoDetectStatus {
     pub running: bool,
     pub window: Option<GameWindowInfo>,
     pub last_brightness: Option<f32>,
+    pub last_menu_brightness: Option<f32>,
     pub phase: String,
     pub last_error: Option<String>,
     pub last_event: Option<String>,
@@ -68,6 +77,7 @@ impl Default for AutoDetectStatus {
             running: false,
             window: None,
             last_brightness: None,
+            last_menu_brightness: None,
             phase: Phase::Unknown.as_str().to_string(),
             last_error: None,
             last_event: None,
