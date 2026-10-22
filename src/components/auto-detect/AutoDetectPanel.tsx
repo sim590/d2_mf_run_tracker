@@ -30,6 +30,7 @@ import {
   type MenuAnchorResult,
   type MenuTemplateTest,
   menuAnchorGroup,
+  normalizeHudMarkerName,
   type Preview,
   percentToNormalized,
   type RegionPercent,
@@ -188,7 +189,7 @@ type HudMarkerDraft = {
 };
 
 type HudCalibrationEntry = {
-  name: string;
+  name: HudMarkerName;
   region: RegionPercent;
   template: string;
   threshold: number;
@@ -200,10 +201,6 @@ type HudCalibration = {
 };
 
 const HUD_CALIBRATION_STORAGE_KEY = "d2mf-hud-calibration-v1";
-
-function isHudMarker(value: string): value is HudMarkerName {
-  return (HUD_MARKERS as readonly string[]).includes(value);
-}
 
 function emptyHudDrafts(): Record<HudMarkerName, HudMarkerDraft> {
   const drafts = {} as Record<HudMarkerName, HudMarkerDraft>;
@@ -222,8 +219,10 @@ function parseHudCalibrationEntry(value: unknown): HudCalibrationEntry | null {
     return null;
   }
   const entry = value as Partial<HudCalibrationEntry>;
+  const name =
+    typeof entry.name === "string" ? normalizeHudMarkerName(entry.name) : null;
   if (
-    typeof entry.name !== "string" ||
+    !name ||
     !isRegionPercent(entry.region) ||
     typeof entry.template !== "string" ||
     entry.template.length === 0 ||
@@ -233,7 +232,7 @@ function parseHudCalibrationEntry(value: unknown): HudCalibrationEntry | null {
     return null;
   }
   return {
-    name: entry.name,
+    name,
     region: entry.region,
     template: entry.template,
     threshold: entry.threshold,
@@ -281,9 +280,6 @@ function hudDraftsFromCalibration(
 ): Record<HudMarkerName, HudMarkerDraft> {
   const drafts = emptyHudDrafts();
   for (const entry of calibration?.templates ?? []) {
-    if (!isHudMarker(entry.name)) {
-      continue;
-    }
     drafts[entry.name] = {
       region: { ...entry.region },
       template: entry.template,
@@ -707,8 +703,9 @@ export function AutoDetectPanel() {
       setHudDrafts((current) => {
         const next = { ...current };
         for (const entry of result.results) {
-          if (isHudMarker(entry.name)) {
-            next[entry.name] = { ...next[entry.name], result: entry };
+          const marker = normalizeHudMarkerName(entry.name);
+          if (marker) {
+            next[marker] = { ...next[marker], result: entry };
           }
         }
         return next;

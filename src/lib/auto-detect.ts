@@ -184,13 +184,29 @@ export const DEFAULT_MENU_ANCHOR_REGIONS: Record<
 
 export const DEFAULT_MENU_ANCHOR: MenuAnchorText = MENU_ANCHOR_OPTIONS[0];
 
-export type HudMarkerName = "life orb" | "mana orb" | "skill bar";
+export type HudMarkerName = "life orb" | "mana orb" | "xp";
 
 export const HUD_MARKERS: readonly HudMarkerName[] = [
   "life orb",
   "mana orb",
-  "skill bar",
+  "xp",
 ] as const;
+
+// The third marker used to be called "skill bar"; keep old saved
+// calibrations working by normalizing the name.
+const LEGACY_HUD_MARKER_NAMES: Record<string, HudMarkerName> = {
+  "skill bar": "xp",
+};
+
+export function normalizeHudMarkerName(value: string): HudMarkerName | null {
+  const legacy = LEGACY_HUD_MARKER_NAMES[value];
+  if (legacy) {
+    return legacy;
+  }
+  return (HUD_MARKERS as readonly string[]).includes(value)
+    ? (value as HudMarkerName)
+    : null;
+}
 
 /// Fixed HUD decision threshold. The live decision uses max(edge, ncc).
 export const HUD_THRESHOLD = 0.3;
@@ -201,9 +217,9 @@ export const HUD_REQUIRED_TEMPLATES = 2;
 // Starting points for 2560x1440. The template is the whole captured region;
 // adjust the region until the static frame fills it, then capture again.
 export const DEFAULT_HUD_REGIONS: Record<HudMarkerName, RegionPercent> = {
-  "life orb": { x: 18, y: 80, width: 20, height: 12 },
-  "mana orb": { x: 78, y: 80, width: 20, height: 12 },
-  "skill bar": { x: 30, y: 88, width: 40, height: 8 },
+  "life orb": { x: 19, y: 83, width: 10, height: 17 },
+  "mana orb": { x: 71, y: 83, width: 10, height: 17 },
+  xp: { x: 30, y: 91, width: 40, height: 2 },
 };
 
 export function defaultMenuAnchorRegion(text: string): RegionPercent {
