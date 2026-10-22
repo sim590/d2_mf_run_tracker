@@ -1,5 +1,5 @@
 //! One-shot diagnostic: render menu anchor strings from the bundled Exocet
-//! Blizzard font and look for them in a captured menu region.
+//! Blizzard fonts and look for them in a captured menu region.
 //!
 //! This module is intentionally independent from the brightness/menu detector.
 //! It only answers "do font-generated templates match the real menu?" so the
@@ -13,34 +13,69 @@ use fontdue::Font;
 use image::{GrayImage, Luma};
 use serde::Serialize;
 
-static FONT_BYTES: &[u8] = include_bytes!("../../../src/assets/exocet-blizzard-medium.ttf");
+static MEDIUM_BYTES: &[u8] = include_bytes!("../../../src/assets/exocet-blizzard-medium.ttf");
+static HEAVY_BYTES: &[u8] = include_bytes!("../../../src/assets/exocet-blizzard-heavy.ttf");
 
 /// Left column buttons on the character selection screen. The strings are
 /// unique to that screen (unlike OPTIONS, which the pause menu also shows).
 pub const MENU_ANCHORS: [&str; 3] = ["CINÉMATIQUES", "CRÉDITS", "QUITTER DIABLO II"];
 
-const SIZES: [f32; 6] = [24.0, 28.0, 32.0, 36.0, 40.0, 44.0];
+const SIZES: [f32; 10] = [16.0, 18.0, 20.0, 22.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0];
 const LETTER_SPACINGS: [f32; 4] = [0.0, 1.0, 2.0, 3.0];
 
 /// Empty pixels around the rendered text so the crop is visually verifiable.
 const RENDER_PADDING: u32 = 3;
-/// Template pixels at or below this value are ignored by the mask.
+/// Intensity pixels at or below this value are ignored by the NCC mask.
 const MASK_THRESHOLD: u8 = 24;
-/// Downsampling factor for the coarse pass.
-const COARSE_FACTOR: u32 = 4;
-/// How many coarse size/spacing candidates are refined at full resolution.
-/// Generous on purpose: a 4x downsample can blur the true match behind a
-/// spurious one, and refining is much cheaper than the coarse scan.
-const COARSE_CANDIDATES: usize = 12;
+/// Template pixels above this value form the binary mask.
+const BINARY_TEMPLATE_THRESHOLD: u8 = 128;
+/// Search pixels at or above this value are considered "on" by Dice.
+const BINARY_SEARCH_THRESHOLD: u8 = 100;
+/// Sobel magnitudes above this value form the edge mask.
+const EDGE_TEMPLATE_THRESHOLD: u8 = 40;
+/// Downsampling factor for the coarse pass. Small templates are only a few
+/// pixels tall, so 2 is safer than 4.
+const COARSE_FACTOR: u32 = 2;
+/// How many coarse combinations are refined at full resolution.
+const COARSE_CANDIDATES: usize = 24;
 /// Coarse scores below this are not worth a full-resolution refinement.
 const COARSE_SKIP_BELOW: f32 = 0.05;
 /// Search radius (in full-resolution pixels) around a coarse match.
-const REFINE_RADIUS: u32 = 12;
+const REFINE_RADIUS: u32 = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontKind {
+    Medium,
+    Heavy,
+}
+
+impl FontKind {
+    const ALL: [FontKind; 2] = [FontKind::Medium, FontKind::Heavy];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            FontKind::Medium => "medium",
+            FontKind::Heavy => "heavy",
+        }
+    }
+
+    fn bytes(self) -> &'static [u8] {
+        match self {
+            FontKind::Medium => MEDIUM_BYTES,
+            FontKind::Heavy => HEAVY_BYTES,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MenuAnchorResult {
     pub text: String,
+    pub font: String,
+    /// Combined score: the best of the intensity, binary and edge scores.
     pub score: f32,
+    pub ncc_score: f32,
+    pub binary_score: f32,
+    pub edge_score: f32,
     pub size: f32,
     pub letter_spacing: f32,
     pub x: u32,
@@ -53,7 +88,11 @@ impl MenuAnchorResult {
     fn empty(text: &str) -> Self {
         Self {
             text: text.to_string(),
+            font: String::new(),
             score: 0.0,
+            ncc_score: 0.0,
+            binary_score: 0.0,
+            edge_score: 0.0,
             size: 0.0,
             letter_spacing: 0.0,
             x: 0,
@@ -64,10 +103,16 @@ impl MenuAnchorResult {
     }
 }
 
-fn font() -> &'static Font {
-    static FONT: OnceLock<Font> = OnceLock::new();
-    FONT.get_or_init(|| {
-        Font::from_bytes(FONT_BYTES, fontdue::FontSettings::default())
+fn font(kind: FontKind) -> &'static Font {
+    static MEDIUM: OnceLock<Font> = OnceLock::new();
+    static HEAVY: OnceLock<Font> = OnceLock::new();
+
+    let cell = match kind {
+        FontKind::Medium => &MEDIUM,
+        FontKind::Heavy => &HEAVY,
+    };
+    cell.get_or_init(|| {
+        Font::from_bytes(kind.bytes(), fontdue::FontSettings::default())
             .expect("the bundled Exocet Blizzard font is valid")
     })
 }
@@ -78,8 +123,13 @@ fn font() -> &'static Font {
 /// laid out normally and each subsequent glyph is shifted by `letter_spacing`.
 /// Kerning between glyphs is lost when spacing is non-zero, which is fine for
 /// this diagnostic.
-pub fn render_menu_text(text: &str, size_px: f32, letter_spacing: f32) -> GrayImage {
-    let font = font();
+pub fn render_menu_text(
+    text: &str,
+    size_px: f32,
+    letter_spacing: f32,
+    font_kind: FontKind,
+) -> GrayImage {
+    let font = font(font_kind);
     let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
     layout.reset(&LayoutSettings::default());
     layout.append(&[font], &TextStyle::new(text, size_px, 0));
@@ -139,53 +189,143 @@ pub fn render_menu_text(text: &str, size_px: f32, letter_spacing: f32) -> GrayIm
     image
 }
 
-/// Masked normalized cross-correlation template.
+/// Precomputed search data shared by every template and position.
+struct SearchContext<'a> {
+    gray: &'a GrayImage,
+    binary: GrayImage,
+    /// Summed-area table of `binary`, with one extra row and column.
+    binary_integral: Vec<u64>,
+    gradient: GrayImage,
+}
+
+impl<'a> SearchContext<'a> {
+    fn new(gray: &'a GrayImage) -> Self {
+        let binary = GrayImage::from_fn(gray.width(), gray.height(), |x, y| {
+            let value = gray.get_pixel(x, y).0[0];
+            Luma([if value >= BINARY_SEARCH_THRESHOLD {
+                255
+            } else {
+                0
+            }])
+        });
+        let binary_integral = build_integral(&binary);
+        let gradient = sobel_magnitude(gray);
+        Self {
+            gray,
+            binary,
+            binary_integral,
+            gradient,
+        }
+    }
+
+    fn binary_sum(&self, x: u32, y: u32, width: u32, height: u32) -> u64 {
+        let stride = self.binary.width() as usize + 1;
+        let x0 = x as usize;
+        let y0 = y as usize;
+        let x1 = (x + width) as usize;
+        let y1 = (y + height) as usize;
+
+        self.binary_integral[y1 * stride + x1] + self.binary_integral[y0 * stride + x0]
+            - self.binary_integral[y0 * stride + x1]
+            - self.binary_integral[y1 * stride + x0]
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Scores {
+    combined: f32,
+    ncc: f32,
+    binary: f32,
+    edge: f32,
+}
+
+/// Masks and normalized values for the three matching metrics.
 struct PreparedTemplate {
     width: u32,
     height: u32,
-    offsets: Vec<(u32, u32)>,
-    values: Vec<f64>,
-    mean: f64,
-    variance: f64,
+    mask_offsets: Vec<(u32, u32)>,
+    mask_values: Vec<f64>,
+    mask_mean: f64,
+    mask_variance: f64,
+    binary_offsets: Vec<(u32, u32)>,
+    binary_count: u64,
+    edge_offsets: Vec<(u32, u32)>,
+    edge_values: Vec<f64>,
+    edge_mean: f64,
+    edge_variance: f64,
 }
 
 impl PreparedTemplate {
-    fn new(image: &GrayImage, threshold: u8) -> Option<Self> {
-        let mut offsets = Vec::new();
-        let mut values = Vec::new();
+    fn new(image: &GrayImage) -> Option<Self> {
+        let mut mask_offsets = Vec::new();
+        let mut mask_values = Vec::new();
+        let mut binary_offsets = Vec::new();
         for y in 0..image.height() {
             for x in 0..image.width() {
                 let value = image.get_pixel(x, y).0[0];
-                if value > threshold {
-                    offsets.push((x, y));
-                    values.push(f64::from(value));
+                if value > MASK_THRESHOLD {
+                    mask_offsets.push((x, y));
+                    mask_values.push(f64::from(value));
+                }
+                if value > BINARY_TEMPLATE_THRESHOLD {
+                    binary_offsets.push((x, y));
                 }
             }
         }
-        if values.is_empty() {
+        if mask_values.is_empty() {
             return None;
         }
 
-        let count = values.len() as f64;
-        let mean = values.iter().sum::<f64>() / count;
-        let variance = values
+        let mask_count = mask_values.len() as f64;
+        let mask_mean = mask_values.iter().sum::<f64>() / mask_count;
+        let mask_variance = mask_values
             .iter()
-            .map(|value| (value - mean).powi(2))
+            .map(|value| (value - mask_mean).powi(2))
             .sum::<f64>();
+
+        let gradient = sobel_magnitude(image);
+        let mut edge_offsets = Vec::new();
+        let mut edge_values = Vec::new();
+        for y in 0..gradient.height() {
+            for x in 0..gradient.width() {
+                let value = gradient.get_pixel(x, y).0[0];
+                if value > EDGE_TEMPLATE_THRESHOLD {
+                    edge_offsets.push((x, y));
+                    edge_values.push(f64::from(value));
+                }
+            }
+        }
+        let edge_count = edge_values.len() as f64;
+        let (edge_mean, edge_variance) = if edge_count > 0.0 {
+            let mean = edge_values.iter().sum::<f64>() / edge_count;
+            let variance = edge_values
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
+            (mean, variance)
+        } else {
+            (0.0, 0.0)
+        };
 
         Some(Self {
             width: image.width(),
             height: image.height(),
-            offsets,
-            values,
-            mean,
-            variance,
+            mask_offsets,
+            mask_values,
+            mask_mean,
+            mask_variance,
+            binary_count: binary_offsets.len() as u64,
+            binary_offsets,
+            edge_offsets,
+            edge_values,
+            edge_mean,
+            edge_variance,
         })
     }
 
-    /// Score one top-left position. Returns 0 when the window is flat.
-    fn score_at(&self, search: &GrayImage, x: u32, y: u32) -> f32 {
-        let count = self.values.len() as f64;
+    /// NCC over the intensity mask. Returns 0 when either window is flat.
+    fn intensity_score_at(&self, search: &GrayImage, x: u32, y: u32) -> f32 {
+        let count = self.mask_values.len() as f64;
         let stride = search.width() as usize;
         let data = search.as_raw();
         let base = y as usize * stride + x as usize;
@@ -193,27 +333,168 @@ impl PreparedTemplate {
         let mut sum_squared = 0.0;
         let mut cross = 0.0;
 
-        for (index, (offset_x, offset_y)) in self.offsets.iter().enumerate() {
+        for (index, (offset_x, offset_y)) in self.mask_offsets.iter().enumerate() {
             let pixel = f64::from(data[base + *offset_y as usize * stride + *offset_x as usize]);
             sum += pixel;
             sum_squared += pixel * pixel;
-            cross += pixel * self.values[index];
+            cross += pixel * self.mask_values[index];
         }
 
-        let mean = sum / count;
-        let variance = sum_squared - count * mean * mean;
-        if variance <= 1e-9 || self.variance <= 1e-9 {
+        correlate(
+            sum,
+            sum_squared,
+            cross,
+            count,
+            self.mask_mean,
+            self.mask_variance,
+        )
+    }
+
+    /// Dice coefficient between the template's glyph mask and the thresholded
+    /// search patch. The search's on-pixel count uses a summed-area table, so
+    /// only the template mask is walked per position.
+    fn binary_score_at(&self, context: &SearchContext<'_>, x: u32, y: u32) -> f32 {
+        if self.binary_count == 0 {
             return 0.0;
         }
 
-        let covariance = cross - count * mean * self.mean;
-        let score = covariance / (variance * self.variance).sqrt();
-        score.clamp(0.0, 1.0) as f32
+        let stride = context.binary.width() as usize;
+        let data = context.binary.as_raw();
+        let base = y as usize * stride + x as usize;
+        let mut intersection = 0u64;
+        for (offset_x, offset_y) in &self.binary_offsets {
+            if data[base + *offset_y as usize * stride + *offset_x as usize] > 0 {
+                intersection += 1;
+            }
+        }
+
+        let search_count = context.binary_sum(x, y, self.width, self.height);
+        let denominator = self.binary_count + search_count;
+        if denominator == 0 {
+            return 0.0;
+        }
+
+        (2.0 * intersection as f64 / denominator as f64).min(1.0) as f32
+    }
+
+    /// NCC over the Sobel edge mask.
+    fn edge_score_at(&self, context: &SearchContext<'_>, x: u32, y: u32) -> f32 {
+        if self.edge_offsets.is_empty() || self.edge_variance <= 1e-9 {
+            return 0.0;
+        }
+
+        let count = self.edge_values.len() as f64;
+        let stride = context.gradient.width() as usize;
+        let data = context.gradient.as_raw();
+        let base = y as usize * stride + x as usize;
+        let mut sum = 0.0;
+        let mut sum_squared = 0.0;
+        let mut cross = 0.0;
+
+        for (index, (offset_x, offset_y)) in self.edge_offsets.iter().enumerate() {
+            let pixel = f64::from(data[base + *offset_y as usize * stride + *offset_x as usize]);
+            sum += pixel;
+            sum_squared += pixel * pixel;
+            cross += pixel * self.edge_values[index];
+        }
+
+        correlate(
+            sum,
+            sum_squared,
+            cross,
+            count,
+            self.edge_mean,
+            self.edge_variance,
+        )
+    }
+
+    fn scores_at(&self, context: &SearchContext<'_>, x: u32, y: u32) -> Scores {
+        let ncc = self.intensity_score_at(context.gray, x, y);
+        let binary = self.binary_score_at(context, x, y);
+        let edge = self.edge_score_at(context, x, y);
+        Scores {
+            combined: ncc.max(binary).max(edge),
+            ncc,
+            binary,
+            edge,
+        }
     }
 }
 
-/// Best top-left position inside an inclusive position range.
-fn scan(
+fn correlate(
+    sum: f64,
+    sum_squared: f64,
+    cross: f64,
+    count: f64,
+    template_mean: f64,
+    template_variance: f64,
+) -> f32 {
+    let mean = sum / count;
+    let variance = sum_squared - count * mean * mean;
+    if variance <= 1e-9 || template_variance <= 1e-9 {
+        return 0.0;
+    }
+
+    let covariance = cross - count * mean * template_mean;
+    let score = covariance / (variance * template_variance).sqrt();
+    score.clamp(0.0, 1.0) as f32
+}
+
+fn build_integral(binary: &GrayImage) -> Vec<u64> {
+    let width = binary.width() as usize;
+    let height = binary.height() as usize;
+    let stride = width + 1;
+    let mut integral = vec![0u64; stride * (height + 1)];
+    let data = binary.as_raw();
+
+    for y in 0..height {
+        let mut row_sum = 0u64;
+        for x in 0..width {
+            row_sum += u64::from(data[y * width + x] / 255);
+            integral[(y + 1) * stride + (x + 1)] = integral[y * stride + (x + 1)] + row_sum;
+        }
+    }
+
+    integral
+}
+
+fn sobel_magnitude(image: &GrayImage) -> GrayImage {
+    let width = image.width();
+    let height = image.height();
+    let mut output = GrayImage::from_pixel(width, height, Luma([0]));
+    if width < 3 || height < 3 {
+        return output;
+    }
+
+    let stride = width as usize;
+    let data = image.as_raw();
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let index = y as usize * stride + x as usize;
+            let top_left = data[index - stride - 1] as i32;
+            let top = data[index - stride] as i32;
+            let top_right = data[index - stride + 1] as i32;
+            let left = data[index - 1] as i32;
+            let right = data[index + 1] as i32;
+            let bottom_left = data[index + stride - 1] as i32;
+            let bottom = data[index + stride] as i32;
+            let bottom_right = data[index + stride + 1] as i32;
+
+            let gradient_x =
+                -top_left + top_right - 2 * left + 2 * right - bottom_left + bottom_right;
+            let gradient_y =
+                -top_left - 2 * top - top_right + bottom_left + 2 * bottom + bottom_right;
+            let magnitude = ((gradient_x * gradient_x + gradient_y * gradient_y) as f32).sqrt();
+            output.put_pixel(x, y, Luma([magnitude.min(255.0) as u8]));
+        }
+    }
+
+    output
+}
+
+/// Best top-left position inside an inclusive position range, ranked by the
+/// intensity NCC only (used by the coarse pass).
+fn scan_intensity(
     template: &PreparedTemplate,
     search: &GrayImage,
     min_x: u32,
@@ -221,6 +502,63 @@ fn scan(
     max_x: u32,
     max_y: u32,
 ) -> Option<(f32, u32, u32)> {
+    let (start_x, end_x, start_y, end_y) =
+        position_range(template, search, min_x, min_y, max_x, max_y)?;
+    let mut best = (-1.0_f32, start_x, start_y);
+    for y in start_y..=end_y {
+        for x in start_x..=end_x {
+            let score = template.intensity_score_at(search, x, y);
+            if score > best.0 {
+                best = (score, x, y);
+            }
+        }
+    }
+
+    (best.0 >= 0.0).then_some(best)
+}
+
+/// Best top-left position inside an inclusive position range, ranked by the
+/// combined score (used by the full-resolution pass).
+fn scan_combined(
+    template: &PreparedTemplate,
+    context: &SearchContext<'_>,
+    min_x: u32,
+    min_y: u32,
+    max_x: u32,
+    max_y: u32,
+) -> Option<(Scores, u32, u32)> {
+    let (start_x, end_x, start_y, end_y) =
+        position_range(template, context.gray, min_x, min_y, max_x, max_y)?;
+    let mut best = Scores {
+        combined: -1.0,
+        ncc: 0.0,
+        binary: 0.0,
+        edge: 0.0,
+    };
+    let mut best_position = (start_x, start_y);
+
+    for y in start_y..=end_y {
+        for x in start_x..=end_x {
+            let scores = template.scores_at(context, x, y);
+            if scores.combined > best.combined {
+                best = scores;
+                best_position = (x, y);
+            }
+        }
+    }
+
+    (best.combined >= 0.0).then_some((best, best_position.0, best_position.1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn position_range(
+    template: &PreparedTemplate,
+    search: &GrayImage,
+    min_x: u32,
+    min_y: u32,
+    max_x: u32,
+    max_y: u32,
+) -> Option<(u32, u32, u32, u32)> {
     if template.width == 0
         || template.height == 0
         || template.width > search.width()
@@ -239,17 +577,7 @@ fn scan(
         return None;
     }
 
-    let mut best = (-1.0_f32, start_x, start_y);
-    for y in start_y..=end_y {
-        for x in start_x..=end_x {
-            let score = template.score_at(search, x, y);
-            if score > best.0 {
-                best = (score, x, y);
-            }
-        }
-    }
-
-    (best.0 >= 0.0).then_some(best)
+    Some((start_x, end_x, start_y, end_y))
 }
 
 fn downsample(image: &GrayImage, factor: u32) -> GrayImage {
@@ -292,42 +620,53 @@ fn downsample(image: &GrayImage, factor: u32) -> GrayImage {
 #[derive(Debug, Clone, Copy)]
 struct CoarseCandidate {
     score: f32,
+    font: FontKind,
     size: f32,
     letter_spacing: f32,
     x: u32,
     y: u32,
 }
 
-/// Render every size/spacing combination for one anchor, run a coarse pass on
-/// a downsampled search image, then refine the best candidates at full
-/// resolution.
-fn best_for_anchor(text: &str, search: &GrayImage, coarse_search: &GrayImage) -> MenuAnchorResult {
+/// Render every font/size/spacing combination for one anchor, run a coarse
+/// pass on a downsampled search image, then refine the best combinations at
+/// full resolution with all three metrics.
+fn best_for_anchor(
+    text: &str,
+    search: &GrayImage,
+    coarse_search: &GrayImage,
+    context: &SearchContext<'_>,
+) -> MenuAnchorResult {
     let mut candidates = Vec::new();
 
-    for size in SIZES {
-        for letter_spacing in LETTER_SPACINGS {
-            let template = render_menu_text(text, size, letter_spacing);
-            if template.width() > search.width() || template.height() > search.height() {
-                continue;
+    for font_kind in FontKind::ALL {
+        for size in SIZES {
+            for letter_spacing in LETTER_SPACINGS {
+                let template = render_menu_text(text, size, letter_spacing, font_kind);
+                if template.width() > search.width() || template.height() > search.height() {
+                    continue;
+                }
+
+                let coarse_template = downsample(&template, COARSE_FACTOR);
+                let Some(prepared) = PreparedTemplate::new(&coarse_template) else {
+                    continue;
+                };
+                let max_x = coarse_search.width().saturating_sub(1);
+                let max_y = coarse_search.height().saturating_sub(1);
+                let Some((score, x, y)) =
+                    scan_intensity(&prepared, coarse_search, 0, 0, max_x, max_y)
+                else {
+                    continue;
+                };
+
+                candidates.push(CoarseCandidate {
+                    score,
+                    font: font_kind,
+                    size,
+                    letter_spacing,
+                    x,
+                    y,
+                });
             }
-
-            let coarse_template = downsample(&template, COARSE_FACTOR);
-            let Some(prepared) = PreparedTemplate::new(&coarse_template, MASK_THRESHOLD) else {
-                continue;
-            };
-            let max_x = coarse_search.width().saturating_sub(1);
-            let max_y = coarse_search.height().saturating_sub(1);
-            let Some((score, x, y)) = scan(&prepared, coarse_search, 0, 0, max_x, max_y) else {
-                continue;
-            };
-
-            candidates.push(CoarseCandidate {
-                score,
-                size,
-                letter_spacing,
-                x,
-                y,
-            });
         }
     }
 
@@ -347,11 +686,16 @@ fn best_for_anchor(text: &str, search: &GrayImage, coarse_search: &GrayImage) ->
     }
 
     for candidate in candidates.into_iter().take(COARSE_CANDIDATES) {
-        let template = render_menu_text(text, candidate.size, candidate.letter_spacing);
+        let template = render_menu_text(
+            text,
+            candidate.size,
+            candidate.letter_spacing,
+            candidate.font,
+        );
         if template.width() > search.width() || template.height() > search.height() {
             continue;
         }
-        let Some(prepared) = PreparedTemplate::new(&template, MASK_THRESHOLD) else {
+        let Some(prepared) = PreparedTemplate::new(&template) else {
             continue;
         };
 
@@ -362,13 +706,18 @@ fn best_for_anchor(text: &str, search: &GrayImage, coarse_search: &GrayImage) ->
         let max_x = center_x.saturating_add(REFINE_RADIUS);
         let max_y = center_y.saturating_add(REFINE_RADIUS);
 
-        let Some((score, x, y)) = scan(&prepared, search, min_x, min_y, max_x, max_y) else {
+        let Some((scores, x, y)) = scan_combined(&prepared, context, min_x, min_y, max_x, max_y)
+        else {
             continue;
         };
-        if score > best.score {
+        if scores.combined > best.score {
             best = MenuAnchorResult {
                 text: text.to_string(),
-                score,
+                font: candidate.font.as_str().to_string(),
+                score: scores.combined,
+                ncc_score: scores.ncc,
+                binary_score: scores.binary,
+                edge_score: scores.edge,
                 size: candidate.size,
                 letter_spacing: candidate.letter_spacing,
                 x,
@@ -382,19 +731,31 @@ fn best_for_anchor(text: &str, search: &GrayImage, coarse_search: &GrayImage) ->
     best
 }
 
-/// Best match per anchor. Coordinates are relative to `search`.
-pub fn test_menu_templates(search: &GrayImage) -> Vec<MenuAnchorResult> {
-    if search.width() == 0 || search.height() == 0 {
-        return MENU_ANCHORS
+/// Best match per selected anchor. `anchor` filters by exact text; an empty
+/// string behaves like `None` (all anchors). Coordinates are relative to
+/// `search`.
+pub fn test_menu_templates(search: &GrayImage, anchor: Option<&str>) -> Vec<MenuAnchorResult> {
+    let selected: Vec<&str> = match anchor.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => MENU_ANCHORS
+            .iter()
+            .copied()
+            .filter(|text| *text == value)
+            .collect(),
+        None => MENU_ANCHORS.to_vec(),
+    };
+
+    if search.width() == 0 || search.height() == 0 || selected.is_empty() {
+        return selected
             .iter()
             .map(|text| MenuAnchorResult::empty(text))
             .collect();
     }
 
+    let context = SearchContext::new(search);
     let coarse_search = downsample(search, COARSE_FACTOR);
-    MENU_ANCHORS
+    selected
         .iter()
-        .map(|text| best_for_anchor(text, search, &coarse_search))
+        .map(|text| best_for_anchor(text, search, &coarse_search, &context))
         .collect()
 }
 
@@ -457,26 +818,36 @@ mod tests {
 
     #[test]
     fn renders_non_empty_menu_text() {
-        let image = render_menu_text("CINÉMATIQUES", 32.0, 0.0);
+        let image = render_menu_text("CINÉMATIQUES", 32.0, 0.0, FontKind::Medium);
         assert!(image.width() > 40);
         assert!(image.height() > 10);
         assert!(image.pixels().any(|pixel| pixel.0[0] > 128));
+
+        let heavy = render_menu_text("CINÉMATIQUES", 32.0, 0.0, FontKind::Heavy);
+        assert!(heavy.width() > 40);
+        assert!(heavy.height() > 10);
     }
 
     #[test]
     fn finds_known_template_position() {
-        let template = render_menu_text("CINÉMATIQUES", 32.0, 0.0);
+        let template = render_menu_text("CINÉMATIQUES", 32.0, 0.0, FontKind::Medium);
         let mut search = GrayImage::from_pixel(420, 160, Luma([0]));
         let (x0, y0) = (30, 40);
         paste(&mut search, &template, x0, y0);
 
-        let results = test_menu_templates(&search);
-        let result = results
-            .iter()
-            .find(|result| result.text == "CINÉMATIQUES")
-            .expect("cinematiques result");
+        let results = test_menu_templates(&search, Some("CINÉMATIQUES"));
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
 
         assert!(result.score > 0.9, "score was {}", result.score);
+        assert!(result.ncc_score > 0.9, "ncc was {}", result.ncc_score);
+        assert!(
+            result.binary_score > 0.85,
+            "binary was {}",
+            result.binary_score
+        );
+        assert!(result.edge_score > 0.9, "edge was {}", result.edge_score);
+        assert_eq!(result.font, "medium");
         assert_eq!(result.size, 32.0);
         assert_eq!(result.letter_spacing, 0.0);
         assert!(
@@ -492,9 +863,29 @@ mod tests {
     }
 
     #[test]
+    fn finds_small_template_in_menu_crop() {
+        // Mirrors the real character-selection crop: ~207x18 px of text in a
+        // 384x58 region, matching the ~20 px size the user measured.
+        let template = render_menu_text("CINÉMATIQUES", 20.0, 0.0, FontKind::Medium);
+        let mut search = GrayImage::from_pixel(384, 58, Luma([0]));
+        let (x0, y0) = (40, 15);
+        paste(&mut search, &template, x0, y0);
+
+        let results = test_menu_templates(&search, Some("CINÉMATIQUES"));
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+
+        assert!(result.score > 0.9, "score was {}", result.score);
+        assert_eq!(result.font, "medium");
+        assert_eq!(result.size, 20.0);
+        assert!(result.x.abs_diff(x0) <= 2);
+        assert!(result.y.abs_diff(y0) <= 2);
+    }
+
+    #[test]
     fn blank_search_scores_low() {
         let search = GrayImage::from_pixel(420, 160, Luma([0]));
-        let results = test_menu_templates(&search);
+        let results = test_menu_templates(&search, None);
         assert_eq!(results.len(), MENU_ANCHORS.len());
         for result in results {
             assert!(
@@ -503,6 +894,29 @@ mod tests {
                 result.text,
                 result.score
             );
+            assert!(result.ncc_score < 0.05);
+            assert!(result.binary_score < 0.05);
+            assert!(result.edge_score < 0.05);
         }
+    }
+
+    #[test]
+    fn filters_to_one_anchor() {
+        // Tiny image: every template is skipped, so this only exercises the
+        // anchor filter without paying for a full match.
+        let search = GrayImage::from_pixel(16, 16, Luma([0]));
+
+        let one = test_menu_templates(&search, Some("CRÉDITS"));
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].text, "CRÉDITS");
+
+        let all = test_menu_templates(&search, None);
+        assert_eq!(all.len(), MENU_ANCHORS.len());
+
+        let empty = test_menu_templates(&search, Some(""));
+        assert_eq!(empty.len(), MENU_ANCHORS.len());
+
+        let unknown = test_menu_templates(&search, Some("OPTIONS"));
+        assert!(unknown.is_empty());
     }
 }

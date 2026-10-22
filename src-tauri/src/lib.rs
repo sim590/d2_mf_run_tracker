@@ -148,13 +148,19 @@ fn capture_preview(region: NormalizedRegion) -> Result<Preview, String> {
 /// One-shot diagnostic: render the menu anchors from the bundled Exocet font
 /// and score them against the captured region. Does not touch run detection.
 #[tauri::command]
-async fn test_menu_templates(region: NormalizedRegion) -> Result<MenuTemplateTest, String> {
-    tauri::async_runtime::spawn_blocking(move || run_menu_template_test(region))
+async fn test_menu_templates(
+    region: NormalizedRegion,
+    anchor: Option<String>,
+) -> Result<MenuTemplateTest, String> {
+    tauri::async_runtime::spawn_blocking(move || run_menu_template_test(region, anchor))
         .await
         .map_err(|error| format!("menu template task failed: {error}"))?
 }
 
-fn run_menu_template_test(region: NormalizedRegion) -> Result<MenuTemplateTest, String> {
+fn run_menu_template_test(
+    region: NormalizedRegion,
+    anchor: Option<String>,
+) -> Result<MenuTemplateTest, String> {
     let backend = X11Backend::new().map_err(|error| error.to_string())?;
     let window = backend
         .find_game_window()
@@ -173,7 +179,7 @@ fn run_menu_template_test(region: NormalizedRegion) -> Result<MenuTemplateTest, 
         image::Luma([luma.clamp(0.0, 255.0) as u8])
     });
 
-    let results = auto_detect::menu_template::test_menu_templates(&gray);
+    let results = auto_detect::menu_template::test_menu_templates(&gray, anchor.as_deref());
 
     let mut rgb = captured.rgb.clone();
     auto_detect::menu_template::draw_debug_rectangles(

@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import {
   type AutoDetectStatus,
   capturePreview,
+  DEFAULT_MENU_ANCHOR,
   DEFAULT_MENU_ANCHOR_REGION_PERCENT,
   DEFAULT_MENU_REGION_PERCENT,
   DEFAULT_REGION_PERCENT,
@@ -17,6 +18,7 @@ import {
   getAutoDetectStatus,
   listenRunEnd,
   listenRunStart,
+  MENU_ANCHOR_OPTIONS,
   type MenuTemplateTest,
   type Preview,
   percentToNormalized,
@@ -42,6 +44,7 @@ export function AutoDetectPanel() {
   const [menuAnchorRegion, setMenuAnchorRegion] = useState<RegionPercent>(
     DEFAULT_MENU_ANCHOR_REGION_PERCENT,
   );
+  const [menuAnchor, setMenuAnchor] = useState<string>(DEFAULT_MENU_ANCHOR);
   const [windowInfo, setWindowInfo] = useState<GameWindowInfo | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [menuPreview, setMenuPreview] = useState<Preview | null>(null);
@@ -193,8 +196,10 @@ export function AutoDetectPanel() {
 
   const handleTestMenuTemplates = () => {
     void runAction("test-menu-templates", async () => {
+      const allAnchors = menuAnchor === "all";
       const result = await testMenuTemplates(
         percentToNormalized(menuAnchorRegion),
+        allAnchors ? null : menuAnchor,
       );
       setMenuTemplateTest(result);
       setWindowInfo(result.window);
@@ -204,10 +209,15 @@ export function AutoDetectPanel() {
               entry.score > current.score ? entry : current,
             )
           : null;
+      if (!best) {
+        appendLog("menu templates: no anchors tested");
+        return;
+      }
+      const details = `${best.score.toFixed(3)} (${best.font || "none"} ${best.size}px, ${best.letter_spacing}px spacing) at ${best.x},${best.y}`;
       appendLog(
-        best
-          ? `menu templates: ${best.text} ${best.score.toFixed(3)} at ${best.x},${best.y} (${best.size}px, ${best.letter_spacing}px spacing)`
-          : "menu templates: no anchors tested",
+        allAnchors
+          ? `best of: ${best.text} ${details}`
+          : `${best.text} ${details}`,
       );
     });
   };
@@ -439,12 +449,30 @@ export function AutoDetectPanel() {
         </div>
 
         <p className="text-sm text-muted-foreground">
-          Renders the left column buttons (CINÉMATIQUES, CRÉDITS, QUITTER DIABLO
-          II) from the bundled Exocet Blizzard font at several sizes and letter
-          spacings, then scores them inside the captured region. Use this on the
-          character selection screen. Values are percentages of the game window;
-          the default matches 2560x1440.
+          Select one anchor and crop its text only (no neighbouring buttons) on
+          the character selection screen. The test renders it with both bundled
+          Exocet Blizzard weights at several sizes and letter spacings, then
+          scores intensity NCC, binary Dice and edge NCC inside the captured
+          region. Values are percentages of the game window; the default is a
+          text-only crop for 2560x1440.
         </p>
+
+        <div className="space-y-1.5">
+          <Label htmlFor="menu-anchor-select">Anchor</Label>
+          <select
+            className="h-10 w-full border border-input bg-background/80 px-3 text-sm text-foreground outline-none focus-visible:border-ring"
+            id="menu-anchor-select"
+            value={menuAnchor}
+            onChange={(event) => setMenuAnchor(event.target.value)}
+          >
+            {MENU_ANCHOR_OPTIONS.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+            <option value="all">All anchors</option>
+          </select>
+        </div>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {(["x", "y", "width", "height"] as const).map((key) => (
@@ -511,18 +539,32 @@ export function AutoDetectPanel() {
                             : "font-mono text-sm text-muted-foreground"
                         }
                       >
-                        {result.score.toFixed(3)}
+                        {result.size > 0
+                          ? `combined ${result.score.toFixed(3)}`
+                          : ""}
                       </span>
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      {result.size > 0
-                        ? `${result.size}px, ${result.letter_spacing}px spacing`
-                        : "no candidate"}
-                    </div>
-                    <div className="text-xs text-muted-foreground">
-                      at {result.x},{result.y} region-relative ({result.width}x
-                      {result.height})
-                    </div>
+                    {result.size > 0 ? (
+                      <>
+                        <div className="text-xs text-muted-foreground">
+                          {result.font} font, {result.size}px,{" "}
+                          {result.letter_spacing}px spacing
+                        </div>
+                        <div className="grid grid-cols-3 gap-1 font-mono text-xs text-muted-foreground">
+                          <span>ncc {result.ncc_score.toFixed(3)}</span>
+                          <span>bin {result.binary_score.toFixed(3)}</span>
+                          <span>edge {result.edge_score.toFixed(3)}</span>
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          at {result.x},{result.y} region-relative (
+                          {result.width}x{result.height})
+                        </div>
+                      </>
+                    ) : (
+                      <div className="text-xs text-muted-foreground">
+                        region too small for any template
+                      </div>
+                    )}
                   </div>
                 );
               })}

@@ -65,7 +65,11 @@ export type RunEndPayload = {
 
 export type MenuAnchorResult = {
   text: string;
+  font: string;
   score: number;
+  ncc_score: number;
+  binary_score: number;
+  edge_score: number;
   size: number;
   letter_spacing: number;
   x: number;
@@ -94,14 +98,22 @@ export const DEFAULT_MENU_REGION_PERCENT: RegionPercent = {
   height: 6.94,
 };
 
-// Left column buttons at the character selection screen on a 2560x1440
-// window. Adjust if the game uses another resolution or UI scale.
+// A text-only crop of the first left column button at 2560x1440. Adjust the
+// region and crop to a single anchor when testing.
 export const DEFAULT_MENU_ANCHOR_REGION_PERCENT: RegionPercent = {
-  x: 1.5,
-  y: 30,
+  x: 3,
+  y: 45.5,
   width: 15,
-  height: 25,
+  height: 4,
 };
+
+export const MENU_ANCHOR_OPTIONS = [
+  "CINÉMATIQUES",
+  "CRÉDITS",
+  "QUITTER DIABLO II",
+] as const;
+
+export const DEFAULT_MENU_ANCHOR = MENU_ANCHOR_OPTIONS[0];
 
 export function percentToNormalized(region: RegionPercent): NormalizedRegion {
   return {
@@ -122,8 +134,9 @@ export function capturePreview(region: NormalizedRegion): Promise<Preview> {
 
 export function testMenuTemplates(
   region: NormalizedRegion,
+  anchor: string | null,
 ): Promise<MenuTemplateTest> {
-  return invoke<MenuTemplateTest>("test_menu_templates", { region });
+  return invoke<MenuTemplateTest>("test_menu_templates", { region, anchor });
 }
 
 export function startAutoDetect(config: AutoDetectConfig): Promise<void> {
