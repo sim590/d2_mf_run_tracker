@@ -13,6 +13,7 @@ pub struct DetectorConfig {
     pub bright_samples: u32,
     pub menu_threshold: f32,
     pub menu_samples: u32,
+    pub menu_dark_samples: u32,
     pub min_run_duration: Duration,
 }
 
@@ -24,6 +25,7 @@ impl Default for DetectorConfig {
             bright_samples: 2,
             menu_threshold: 50.0,
             menu_samples: 2,
+            menu_dark_samples: 4,
             min_run_duration: Duration::from_secs(3),
         }
     }
@@ -60,6 +62,7 @@ pub struct LoadingDetector {
     dark_streak: u32,
     bright_streak: u32,
     menu_streak: u32,
+    menu_dark_streak: u32,
     run_started_at: Option<Instant>,
 }
 
@@ -71,6 +74,7 @@ impl LoadingDetector {
             dark_streak: 0,
             bright_streak: 0,
             menu_streak: 0,
+            menu_dark_streak: 0,
             run_started_at: None,
         }
     }
@@ -113,13 +117,16 @@ impl LoadingDetector {
                     self.dark_streak = 0;
                     self.bright_streak = 0;
                 }
+                self.menu_dark_streak = 0;
                 // Wait for menu confirmation. A bright menu frame must not
                 // start a run through the loading probe.
                 return events;
             }
             self.menu_streak = 0;
+            self.menu_dark_streak = self.menu_dark_streak.saturating_add(1);
         } else {
             self.menu_streak = 0;
+            self.menu_dark_streak = 0;
         }
 
         if brightness <= self.config.dark_threshold {
@@ -157,7 +164,18 @@ impl LoadingDetector {
                         }
                     }
                 }
-                Phase::InGame | Phase::Menu => {}
+                Phase::InGame => {}
+                Phase::Menu => {
+                    if self.menu_dark_streak >= self.config.menu_dark_samples.max(1)
+                        && self.bright_streak >= self.config.bright_samples.max(1)
+                    {
+                        self.phase = Phase::InGame;
+                        if self.run_started_at.is_none() {
+                            self.run_started_at = Some(now);
+                            events.push(DetectorEvent::RunStart);
+                        }
+                    }
+                }
             }
         }
 
@@ -177,6 +195,7 @@ mod tests {
             bright_samples: 2,
             menu_threshold: 50.0,
             menu_samples: 2,
+            menu_dark_samples: 4,
             min_run_duration: Duration::from_secs(3),
         })
     }
@@ -365,5 +384,25 @@ mod tests {
             detector.process_with_menu(100.0, Some(0.0), at(base, 1250)),
             vec![DetectorEvent::RunStart]
         );
+    }
+
+    #[test]
+    fn menu_dark_then_game_bright_leaves_menu_and_starts_run() {
+        let mut detector = detector();
+        let base = Instant::now();
+        detector.process_with_menu(100.0, Some(88.0), at(base, 0));
+        detector.process_with_menu(100.0, Some(88.0), at(base, 250));
+        assert_eq!(detector.phase(), Phase::Menu);
+
+        for step in 0..4u64 {
+            let offset = 500 + step * 250;
+            let events = detector.process_with_menu(100.0, Some(22.0), at(base, offset));
+            if step < 3 {
+                assert!(events.is_empty());
+            } else {
+                assert_eq!(events, vec![DetectorEvent::RunStart]);
+            }
+        }
+        assert_eq!(detector.phase(), Phase::InGame);
     }
 }

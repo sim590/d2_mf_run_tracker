@@ -27,6 +27,7 @@ pub struct AutoDetectConfig {
     pub bright_samples: u32,
     pub menu_threshold: f32,
     pub menu_samples: u32,
+    pub menu_dark_samples: u32,
     pub poll_interval_ms: u64,
     pub min_run_seconds: f64,
 }
@@ -41,6 +42,7 @@ impl Default for AutoDetectConfig {
             bright_samples: 2,
             menu_threshold: 50.0,
             menu_samples: 2,
+            menu_dark_samples: 4,
             poll_interval_ms: 250,
             min_run_seconds: 3.0,
         }
@@ -55,6 +57,7 @@ impl AutoDetectConfig {
             bright_samples: self.bright_samples.max(1),
             menu_threshold: self.menu_threshold,
             menu_samples: self.menu_samples.max(1),
+            menu_dark_samples: self.menu_dark_samples.max(1),
             min_run_duration: Duration::from_secs_f64(self.min_run_seconds.max(0.0)),
         }
     }
