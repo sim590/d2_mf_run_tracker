@@ -91,6 +91,18 @@ impl ImageData {
         (total as f64 / self.rgb.len() as f64) as f32
     }
 
+    /// Rec. 601 luma, matching the formula used by the diagnostics.
+    pub fn to_luma8(&self) -> image::GrayImage {
+        image::GrayImage::from_fn(self.width, self.height, |x, y| {
+            let offset = (y as usize * self.width as usize + x as usize) * 3;
+            let red = f32::from(self.rgb[offset]);
+            let green = f32::from(self.rgb[offset + 1]);
+            let blue = f32::from(self.rgb[offset + 2]);
+            let luma = (0.299 * red + 0.587 * green + 0.114 * blue).round();
+            image::Luma([luma.clamp(0.0, 255.0) as u8])
+        })
+    }
+
     pub fn to_png_base64(&self) -> Result<String, CaptureError> {
         let image = image::RgbImage::from_raw(self.width, self.height, self.rgb.clone())
             .ok_or_else(|| CaptureError::Encode("invalid RGB buffer".into()))?;
@@ -160,6 +172,16 @@ mod tests {
             rgb: vec![0, 0, 0, 255, 255, 255],
         };
         assert!((image.mean_brightness() - 127.5).abs() < 0.1);
+    }
+
+    #[test]
+    fn luma_uses_rec601_weights() {
+        let image = ImageData {
+            width: 1,
+            height: 1,
+            rgb: vec![255, 0, 0],
+        };
+        assert_eq!(image.to_luma8().get_pixel(0, 0).0[0], 76);
     }
 
     #[test]

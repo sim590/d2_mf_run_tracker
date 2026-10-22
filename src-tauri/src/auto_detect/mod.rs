@@ -16,14 +16,27 @@ use serde::{Deserialize, Serialize};
 
 pub use capture::{CaptureBackend, GameWindowInfo, NormalizedRegion};
 pub use detector::{DetectorConfig, DetectorEvent, LoadingDetector, Phase};
-pub use menu_template::MenuAnchorResult;
+pub use menu_template::{MenuAnchorResult, MenuTemplateMatcher};
 pub use x11::X11Backend;
+
+/// A single calibrated font-generated menu template. The live loop only runs
+/// this one template; the diagnostic search is not used per frame.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MenuTemplateConfig {
+    pub region: NormalizedRegion,
+    pub text: String,
+    pub font: String,
+    pub size: f32,
+    pub letter_spacing: f32,
+    pub threshold: f32,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AutoDetectConfig {
     pub loading_region: NormalizedRegion,
     pub menu_region: Option<NormalizedRegion>,
+    pub menu_template: Option<MenuTemplateConfig>,
     pub dark_threshold: f32,
     pub dark_samples: u32,
     pub bright_samples: u32,
@@ -39,6 +52,7 @@ impl Default for AutoDetectConfig {
         Self {
             loading_region: NormalizedRegion::default(),
             menu_region: None,
+            menu_template: None,
             dark_threshold: 22.0,
             dark_samples: 2,
             bright_samples: 2,
@@ -71,6 +85,7 @@ pub struct AutoDetectStatus {
     pub window: Option<GameWindowInfo>,
     pub last_brightness: Option<f32>,
     pub last_menu_brightness: Option<f32>,
+    pub last_menu_score: Option<f32>,
     pub phase: String,
     pub last_error: Option<String>,
     pub last_event: Option<String>,
@@ -83,6 +98,7 @@ impl Default for AutoDetectStatus {
             window: None,
             last_brightness: None,
             last_menu_brightness: None,
+            last_menu_score: None,
             phase: Phase::Unknown.as_str().to_string(),
             last_error: None,
             last_event: None,

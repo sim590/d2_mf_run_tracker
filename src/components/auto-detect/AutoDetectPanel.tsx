@@ -35,6 +35,72 @@ type LogEntry = {
   text: string;
 };
 
+type MenuCalibration = {
+  region: RegionPercent;
+  text: string;
+  font: string;
+  size: number;
+  letter_spacing: number;
+  score: number;
+};
+
+const MENU_CALIBRATION_STORAGE_KEY = "d2mf-menu-calibration-v1";
+
+function loadMenuCalibration(): MenuCalibration | null {
+  try {
+    const raw = window.localStorage.getItem(MENU_CALIBRATION_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<MenuCalibration> | null;
+    if (
+      !parsed ||
+      typeof parsed.text !== "string" ||
+      typeof parsed.font !== "string" ||
+      !parsed.region ||
+      typeof parsed.region.x !== "number" ||
+      typeof parsed.region.y !== "number" ||
+      typeof parsed.region.width !== "number" ||
+      typeof parsed.region.height !== "number" ||
+      typeof parsed.size !== "number" ||
+      typeof parsed.letter_spacing !== "number"
+    ) {
+      return null;
+    }
+    return {
+      region: {
+        x: parsed.region.x,
+        y: parsed.region.y,
+        width: parsed.region.width,
+        height: parsed.region.height,
+      },
+      text: parsed.text,
+      font: parsed.font,
+      size: parsed.size,
+      letter_spacing: parsed.letter_spacing,
+      score: typeof parsed.score === "number" ? parsed.score : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function persistMenuCalibration(calibration: MenuCalibration | null) {
+  try {
+    if (calibration) {
+      window.localStorage.setItem(
+        MENU_CALIBRATION_STORAGE_KEY,
+        JSON.stringify(calibration),
+      );
+    } else {
+      window.localStorage.removeItem(MENU_CALIBRATION_STORAGE_KEY);
+    }
+  } catch {
+    // localStorage may be unavailable; the calibration still works for this
+    // app session.
+  }
+}
+
 export function AutoDetectPanel() {
   const [region, setRegion] = useState<RegionPercent>(DEFAULT_REGION_PERCENT);
   const [menuRegion, setMenuRegion] = useState<RegionPercent>(
@@ -50,6 +116,8 @@ export function AutoDetectPanel() {
   const [menuPreview, setMenuPreview] = useState<Preview | null>(null);
   const [menuTemplateTest, setMenuTemplateTest] =
     useState<MenuTemplateTest | null>(null);
+  const [menuCalibration, setMenuCalibration] =
+    useState<MenuCalibration | null>(() => loadMenuCalibration());
   const [status, setStatus] = useState<AutoDetectStatus | null>(null);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(
     null,
@@ -222,6 +290,42 @@ export function AutoDetectPanel() {
     });
   };
 
+  const handleSaveMenuCalibration = () => {
+    if (!menuTemplateTest || menuTemplateTest.results.length === 0) {
+      return;
+    }
+
+    const candidate =
+      menuAnchor === "all"
+        ? menuTemplateTest.results.reduce((current, entry) =>
+            entry.score > current.score ? entry : current,
+          )
+        : menuTemplateTest.results[0];
+    if (!candidate || candidate.size <= 0 || candidate.binary_score < 0.3) {
+      return;
+    }
+
+    const calibration: MenuCalibration = {
+      region: menuAnchorRegion,
+      text: candidate.text,
+      font: candidate.font,
+      size: candidate.size,
+      letter_spacing: candidate.letter_spacing,
+      score: candidate.binary_score,
+    };
+    setMenuCalibration(calibration);
+    persistMenuCalibration(calibration);
+    appendLog(
+      `menu calibration saved: ${calibration.text} ${calibration.font} ${calibration.size}px, ${calibration.letter_spacing}px spacing, binary ${calibration.score.toFixed(3)}`,
+    );
+  };
+
+  const handleClearMenuCalibration = () => {
+    setMenuCalibration(null);
+    persistMenuCalibration(null);
+    appendLog("menu calibration cleared");
+  };
+
   const handleStart = () => {
     if (!activeSession) {
       setError("Create a session before enabling auto-detect.");
@@ -232,12 +336,22 @@ export function AutoDetectPanel() {
       await startAutoDetect({
         loading_region: percentToNormalized(region),
         menu_region: menuEnabled ? percentToNormalized(menuRegion) : null,
+        menu_template: menuCalibration
+          ? {
+              region: percentToNormalized(menuCalibration.region),
+              text: menuCalibration.text,
+              font: menuCalibration.font,
+              size: menuCalibration.size,
+              letter_spacing: menuCalibration.letter_spacing,
+              threshold: 0.3,
+            }
+          : null,
         dark_threshold: 22,
         dark_samples: 2,
         bright_samples: 2,
         menu_threshold: 50,
         menu_samples: 2,
-        menu_dark_samples: 4,
+        menu_dark_samples: menuCalibration ? 2 : 4,
         poll_interval_ms: 250,
         min_run_seconds: 3,
       });
@@ -259,6 +373,19 @@ export function AutoDetectPanel() {
     menuTemplateTest && menuTemplateTest.results.length > 0
       ? Math.max(...menuTemplateTest.results.map((result) => result.score))
       : 0;
+
+  const calibrationCandidate =
+    menuTemplateTest && menuTemplateTest.results.length > 0
+      ? menuAnchor === "all"
+        ? menuTemplateTest.results.reduce((current, entry) =>
+            entry.score > current.score ? entry : current,
+          )
+        : menuTemplateTest.results[0]
+      : null;
+  const canSaveCalibration =
+    calibrationCandidate !== null &&
+    calibrationCandidate.size > 0 &&
+    calibrationCandidate.binary_score >= 0.3;
 
   return (
     <div className="tracker-screen">
@@ -512,7 +639,9 @@ export function AutoDetectPanel() {
         </div>
 
         <p className="text-xs text-muted-foreground">
-          This only tests font-generated templates; run detection is unchanged.
+          Testing alone does not change run detection. Saving a calibration
+          switches the menu boundary to this binary template; the brightness
+          menu probe stays as a fallback.
         </p>
 
         {menuTemplateTest ? (
@@ -577,8 +706,84 @@ export function AutoDetectPanel() {
                 src={menuTemplateTest.preview}
               />
             ) : null}
+
+            <div className="flex flex-wrap items-center gap-3">
+              <Button
+                className="tracker-action-primary"
+                disabled={!canSaveCalibration}
+                onClick={handleSaveMenuCalibration}
+              >
+                Use as menu calibration
+              </Button>
+              {canSaveCalibration && calibrationCandidate ? (
+                <span className="text-xs text-muted-foreground">
+                  Saves {calibrationCandidate.text} ({calibrationCandidate.font}{" "}
+                  {calibrationCandidate.size}px,{" "}
+                  {calibrationCandidate.letter_spacing}px spacing, binary{" "}
+                  {calibrationCandidate.binary_score.toFixed(3)}).
+                </span>
+              ) : (
+                <span className="text-xs text-muted-foreground">
+                  Need a result with a size and a binary score of at least 0.300
+                  {calibrationCandidate && calibrationCandidate.size > 0
+                    ? ` (currently ${calibrationCandidate.binary_score.toFixed(3)})`
+                    : ""}
+                  .
+                </span>
+              )}
+            </div>
           </div>
         ) : null}
+
+        <div
+          className={
+            menuCalibration
+              ? "space-y-1 border border-emerald-500/60 bg-emerald-500/10 p-3"
+              : "space-y-1 border border-border/50 p-3"
+          }
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-sm font-medium">
+              {menuCalibration
+                ? "Saved menu calibration"
+                : "No saved menu calibration"}
+            </span>
+            {menuCalibration ? (
+              <Button
+                className="tracker-action-secondary"
+                onClick={handleClearMenuCalibration}
+              >
+                Clear calibration
+              </Button>
+            ) : null}
+          </div>
+          {menuCalibration ? (
+            <>
+              <div className="text-sm text-muted-foreground">
+                {menuCalibration.text} - {menuCalibration.font}{" "}
+                {menuCalibration.size}px, {menuCalibration.letter_spacing}px
+                spacing, binary score {menuCalibration.score.toFixed(3)}
+              </div>
+              <div className="text-xs text-muted-foreground">
+                region x {menuCalibration.region.x}%, y{" "}
+                {menuCalibration.region.y}%, width{" "}
+                {menuCalibration.region.width}%, height{" "}
+                {menuCalibration.region.height}%
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Live menu detection uses the binary Dice score with threshold
+                0.3 over two frames. The brightness menu probe is only a
+                fallback.
+              </p>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Without a calibration, the brightness menu region is used. Save a
+              successful test above to switch the menu boundary to the binary
+              template.
+            </p>
+          )}
+        </div>
       </section>
 
       <section className="tracker-section-panel space-y-3">
@@ -613,6 +818,9 @@ export function AutoDetectPanel() {
           <div>
             Menu brightness:{" "}
             {status?.last_menu_brightness?.toFixed(1) ?? "none"}
+          </div>
+          <div>
+            Menu template score: {status?.last_menu_score?.toFixed(3) ?? "none"}
           </div>
           <div>Last event: {status?.last_event ?? "none"}</div>
           <div className="sm:col-span-2">

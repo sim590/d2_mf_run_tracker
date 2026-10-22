@@ -10,8 +10,8 @@ mod auto_detect;
 
 use auto_detect::{
     AutoDetectConfig, AutoDetectStatus, CaptureBackend, DetectorEvent, GameWindowInfo,
-    LoadingDetector, MenuTemplateTest, NormalizedRegion, Preview, RunEndPayload, RunStartPayload,
-    X11Backend,
+    LoadingDetector, MenuTemplateMatcher, MenuTemplateTest, NormalizedRegion, Preview,
+    RunEndPayload, RunStartPayload, X11Backend,
 };
 
 struct AutoDetectHandle {
@@ -170,15 +170,7 @@ fn run_menu_template_test(
         .capture_region(&window, pixels)
         .map_err(|error| error.to_string())?;
 
-    let gray = image::GrayImage::from_fn(captured.width, captured.height, |x, y| {
-        let offset = (y as usize * captured.width as usize + x as usize) * 3;
-        let red = f32::from(captured.rgb[offset]);
-        let green = f32::from(captured.rgb[offset + 1]);
-        let blue = f32::from(captured.rgb[offset + 2]);
-        let luma = (0.299 * red + 0.587 * green + 0.114 * blue).round();
-        image::Luma([luma.clamp(0.0, 255.0) as u8])
-    });
-
+    let gray = captured.to_luma8();
     let results = auto_detect::menu_template::test_menu_templates(&gray, anchor.as_deref());
 
     let mut rgb = captured.rgb.clone();
@@ -236,6 +228,23 @@ fn set_status_error(status: &Arc<Mutex<AutoDetectStatus>>, message: String) {
     });
 }
 
+fn menu_brightness_probe(
+    backend: &X11Backend,
+    window: &GameWindowInfo,
+    region: Option<NormalizedRegion>,
+) -> (Option<f32>, Option<String>) {
+    match region {
+        Some(menu_region) => {
+            let menu_pixels = menu_region.to_pixels(window);
+            match backend.capture_region(window, menu_pixels) {
+                Ok(menu_image) => (Some(menu_image.mean_brightness()), None),
+                Err(error) => (None, Some(error.to_string())),
+            }
+        }
+        None => (None, None),
+    }
+}
+
 fn run_auto_detect(
     app: tauri::AppHandle,
     config: AutoDetectConfig,
@@ -263,6 +272,27 @@ fn run_auto_detect(
     let mut error_count = 0u32;
     let mut last_window_refresh = Instant::now();
 
+    let mut matcher_error: Option<String> = None;
+    let menu_matcher = match config.menu_template.as_ref() {
+        Some(template) => match MenuTemplateMatcher::new(
+            &template.text,
+            &template.font,
+            template.size,
+            template.letter_spacing,
+        ) {
+            Some(matcher) => Some(matcher),
+            None => {
+                let message =
+                    "menu template calibration is invalid; using the brightness menu probe"
+                        .to_string();
+                set_status_error(&status, message.clone());
+                matcher_error = Some(message);
+                None
+            }
+        },
+        None => None,
+    };
+
     while !stop.load(Ordering::Relaxed) {
         if last_window_refresh.elapsed() >= Duration::from_secs(5) {
             if let Ok(found) = backend.find_game_window() {
@@ -275,25 +305,56 @@ fn run_auto_detect(
             Ok(image) => {
                 error_count = 0;
                 let brightness = image.mean_brightness();
-                let (menu_brightness, menu_error) = match config.menu_region {
-                    Some(menu_region) => {
-                        let menu_pixels = menu_region.to_pixels(&window);
+                let (menu_signal, status_menu_brightness, last_menu_score, probe_error) = match (
+                    config.menu_template.as_ref(),
+                    menu_matcher.as_ref(),
+                ) {
+                    (Some(template), Some(matcher)) => {
+                        let menu_pixels = template.region.to_pixels(&window);
                         match backend.capture_region(&window, menu_pixels) {
-                            Ok(menu_image) => (Some(menu_image.mean_brightness()), None),
-                            Err(error) => (None, Some(error.to_string())),
+                            Ok(menu_image) => {
+                                let score = matcher.score(&menu_image.to_luma8());
+                                let visible = score >= template.threshold;
+                                (
+                                    Some(if visible { 100.0 } else { 0.0 }),
+                                    None,
+                                    Some(score),
+                                    None,
+                                )
+                            }
+                            Err(error) => {
+                                // Do not drop menu detection for a frame if
+                                // the calibrated crop cannot be captured.
+                                let (brightness, fallback_error) =
+                                    menu_brightness_probe(&backend, &window, config.menu_region);
+                                let message = match fallback_error {
+                                        Some(fallback) => format!(
+                                            "menu template capture failed: {error}; brightness fallback failed: {fallback}"
+                                        ),
+                                        None => format!(
+                                            "menu template capture failed: {error}; using brightness fallback"
+                                        ),
+                                    };
+                                (brightness, brightness, None, Some(message))
+                            }
                         }
                     }
-                    None => (None, None),
+                    _ => {
+                        let (brightness, error) =
+                            menu_brightness_probe(&backend, &window, config.menu_region);
+                        (brightness, brightness, None, error)
+                    }
                 };
-                let events =
-                    detector.process_with_menu(brightness, menu_brightness, Instant::now());
+                let menu_error = probe_error.or_else(|| matcher_error.clone());
+                let events = detector.process_with_menu(brightness, menu_signal, Instant::now());
                 let phase = detector.phase().as_str().to_string();
 
                 update_status(&status, |current| {
                     current.running = true;
                     current.window = Some(window.clone());
                     current.last_brightness = Some(brightness);
-                    current.last_menu_brightness = menu_brightness;
+                    current.last_menu_brightness = status_menu_brightness;
+                    current.last_menu_score = last_menu_score;
                     current.phase = phase;
                     current.last_error = menu_error;
                 });

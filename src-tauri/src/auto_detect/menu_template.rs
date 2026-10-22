@@ -1,9 +1,9 @@
-//! One-shot diagnostic: render menu anchor strings from the bundled Exocet
-//! Blizzard fonts and look for them in a captured menu region.
+//! Font-generated menu templates from the bundled Exocet Blizzard fonts.
 //!
-//! This module is intentionally independent from the brightness/menu detector.
-//! It only answers "do font-generated templates match the real menu?" so the
-//! result can guide a future implementation, if any.
+//! The diagnostic renders every anchor/size/spacing combination and scores
+//! them with three metrics. The live loop uses a single calibrated template
+//! and only its binary Dice score, with the existing detector still consuming
+//! the synthetic menu signal.
 
 use std::cmp::Ordering;
 use std::sync::OnceLock;
@@ -200,21 +200,24 @@ struct SearchContext<'a> {
 
 impl<'a> SearchContext<'a> {
     fn new(gray: &'a GrayImage) -> Self {
-        let binary = GrayImage::from_fn(gray.width(), gray.height(), |x, y| {
-            let value = gray.get_pixel(x, y).0[0];
-            Luma([if value >= BINARY_SEARCH_THRESHOLD {
-                255
-            } else {
-                0
-            }])
-        });
-        let binary_integral = build_integral(&binary);
-        let gradient = sobel_magnitude(gray);
+        let (binary, binary_integral) = binary_view(gray);
         Self {
             gray,
             binary,
             binary_integral,
-            gradient,
+            gradient: sobel_magnitude(gray),
+        }
+    }
+
+    /// Lightweight constructor for binary-only matching: skips the Sobel pass
+    /// used by the diagnostic edge score.
+    fn new_binary(gray: &'a GrayImage) -> Self {
+        let (binary, binary_integral) = binary_view(gray);
+        Self {
+            gray,
+            binary,
+            binary_integral,
+            gradient: GrayImage::new(0, 0),
         }
     }
 
@@ -438,6 +441,19 @@ fn correlate(
     let covariance = cross - count * mean * template_mean;
     let score = covariance / (variance * template_variance).sqrt();
     score.clamp(0.0, 1.0) as f32
+}
+
+fn binary_view(gray: &GrayImage) -> (GrayImage, Vec<u64>) {
+    let binary = GrayImage::from_fn(gray.width(), gray.height(), |x, y| {
+        let value = gray.get_pixel(x, y).0[0];
+        Luma([if value >= BINARY_SEARCH_THRESHOLD {
+            255
+        } else {
+            0
+        }])
+    });
+    let integral = build_integral(&binary);
+    (binary, integral)
 }
 
 fn build_integral(binary: &GrayImage) -> Vec<u64> {
@@ -759,6 +775,55 @@ pub fn test_menu_templates(search: &GrayImage, anchor: Option<&str>) -> Vec<Menu
         .collect()
 }
 
+/// A single calibrated template used by the live auto-detect loop. Only the
+/// binary Dice score is used, so no multi-size search happens per frame.
+pub struct MenuTemplateMatcher {
+    template: PreparedTemplate,
+}
+
+impl MenuTemplateMatcher {
+    pub fn new(text: &str, font: &str, size: f32, letter_spacing: f32) -> Option<Self> {
+        let font_kind = match font.trim().to_ascii_lowercase().as_str() {
+            "heavy" => FontKind::Heavy,
+            "medium" | "" => FontKind::Medium,
+            _ => return None,
+        };
+        if !size.is_finite() || size <= 0.0 || !letter_spacing.is_finite() {
+            return None;
+        }
+
+        let image = render_menu_text(text, size, letter_spacing, font_kind);
+        let template = PreparedTemplate::new(&image)?;
+        if template.binary_count == 0 {
+            return None;
+        }
+
+        Some(Self { template })
+    }
+
+    /// Best binary Dice score over the whole search image.
+    pub fn score(&self, search: &GrayImage) -> f32 {
+        if search.width() < self.template.width || search.height() < self.template.height {
+            return 0.0;
+        }
+
+        let context = SearchContext::new_binary(search);
+        let max_x = search.width() - self.template.width;
+        let max_y = search.height() - self.template.height;
+        let mut best = 0.0_f32;
+        for y in 0..=max_y {
+            for x in 0..=max_x {
+                let score = self.template.binary_score_at(&context, x, y);
+                if score > best {
+                    best = score;
+                }
+            }
+        }
+
+        best
+    }
+}
+
 /// Draw one rectangle per result on an RGB buffer. Matches at 0.5 or more are
 /// green, weaker candidates amber. This is only for the diagnostic preview.
 pub fn draw_debug_rectangles(
@@ -880,6 +945,48 @@ mod tests {
         assert_eq!(result.size, 20.0);
         assert!(result.x.abs_diff(x0) <= 2);
         assert!(result.y.abs_diff(y0) <= 2);
+    }
+
+    #[test]
+    fn matcher_scores_pasted_template() {
+        let template = render_menu_text("CINÉMATIQUES", 20.0, 1.0, FontKind::Medium);
+        let mut search = GrayImage::from_pixel(384, 58, Luma([0]));
+        paste(&mut search, &template, 40, 15);
+
+        let matcher =
+            MenuTemplateMatcher::new("CINÉMATIQUES", "MEDIUM", 20.0, 1.0).expect("valid matcher");
+        assert!(matcher.score(&search) > 0.9);
+    }
+
+    #[test]
+    fn matcher_blank_search_scores_low() {
+        let search = GrayImage::from_pixel(384, 58, Luma([0]));
+        let matcher =
+            MenuTemplateMatcher::new("CINÉMATIQUES", "medium", 20.0, 1.0).expect("valid matcher");
+        assert!(matcher.score(&search) < 0.05);
+    }
+
+    #[test]
+    fn matcher_scores_different_region_low_and_validates_input() {
+        // An unrelated small bright blob is not the calibrated text.
+        let mut search = GrayImage::from_pixel(384, 58, Luma([0]));
+        for y in 20..32 {
+            for x in 60..72 {
+                search.put_pixel(x, y, Luma([255]));
+            }
+        }
+
+        let matcher =
+            MenuTemplateMatcher::new("CINÉMATIQUES", "medium", 20.0, 1.0).expect("valid matcher");
+        // Below the 0.3 live decision threshold, unlike an exact match (>0.9).
+        assert!(
+            matcher.score(&search) < 0.25,
+            "unrelated region scored {}",
+            matcher.score(&search)
+        );
+
+        assert!(MenuTemplateMatcher::new("CINÉMATIQUES", "nope", 20.0, 0.0).is_none());
+        assert!(MenuTemplateMatcher::new("CINÉMATIQUES", "medium", 0.0, 0.0).is_none());
     }
 
     #[test]

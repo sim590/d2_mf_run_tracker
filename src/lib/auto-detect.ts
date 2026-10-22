@@ -30,9 +30,19 @@ export type Preview = {
   window: GameWindowInfo;
 };
 
+export type MenuTemplateConfig = {
+  region: NormalizedRegion;
+  text: string;
+  font: string;
+  size: number;
+  letter_spacing: number;
+  threshold: number;
+};
+
 export type AutoDetectConfig = {
   loading_region: NormalizedRegion;
   menu_region: NormalizedRegion | null;
+  menu_template: MenuTemplateConfig | null;
   dark_threshold: number;
   dark_samples: number;
   bright_samples: number;
@@ -48,6 +58,7 @@ export type AutoDetectStatus = {
   window: GameWindowInfo | null;
   last_brightness: number | null;
   last_menu_brightness: number | null;
+  last_menu_score: number | null;
   phase: string;
   last_error: string | null;
   last_event: string | null;
