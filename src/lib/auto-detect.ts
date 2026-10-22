@@ -31,6 +31,7 @@ export type AutoDetectConfig = {
   bright_samples: number;
   menu_threshold: number;
   menu_samples: number;
+  menu_dark_samples: number;
   poll_interval_ms: number;
   min_run_seconds: number;
 };

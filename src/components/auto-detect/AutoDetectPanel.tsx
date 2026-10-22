@@ -176,6 +176,7 @@ export function AutoDetectPanel() {
         bright_samples: 2,
         menu_threshold: 50,
         menu_samples: 2,
+        menu_dark_samples: 4,
         poll_interval_ms: 250,
         min_run_seconds: 3,
       });
