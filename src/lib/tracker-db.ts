@@ -265,7 +265,7 @@ export async function getCompletedSessionSummaries() {
   );
 }
 
-export async function createSessionAndStartRun(locationName: string) {
+export async function createSession(locationName: string) {
   const database = await getDatabase();
   const farmLocation = await ensureFarmLocation(locationName);
   const startedAt = new Date().toISOString();
@@ -279,15 +279,10 @@ export async function createSessionAndStartRun(locationName: string) {
     throw new Error("Unable to create the new session.");
   }
 
-  await database.execute(
-    "INSERT INTO runs (session_id, started_at) VALUES (?, ?)",
-    [insertResult.lastInsertId, startedAt],
-  );
-
   const activeSession = await getActiveSession();
 
   if (!activeSession || activeSession.id !== insertResult.lastInsertId) {
-    throw new Error("Unable to start the first run for the new session.");
+    throw new Error("Unable to load the new session.");
   }
 
   return activeSession;
@@ -337,13 +332,6 @@ export async function cancelRun(runId: number, sessionId: number) {
   await database.execute("DELETE FROM runs WHERE id = ? AND ended_at IS NULL", [
     runId,
   ]);
-
-  const remainingRuns = await getSessionRuns(sessionId);
-
-  if (remainingRuns.length === 0) {
-    await deleteSession(sessionId);
-    return null;
-  }
 
   const activeSession = await getActiveSession();
 

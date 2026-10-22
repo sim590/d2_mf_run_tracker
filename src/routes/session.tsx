@@ -5,47 +5,28 @@ import { ActiveSessionScreen } from "@/components/tracker/ActiveSessionScreen";
 import { TrackerShell } from "@/components/tracker/TrackerShell";
 import { useTrackerData } from "@/hooks/useTrackerData";
 import {
-  type ActiveSession,
   cancelRun,
   completeRun,
-  createSessionAndStartRun,
   discardSession,
   endSession,
   startRun,
 } from "@/lib/tracker-db";
 import { getTrackerErrorMessage } from "@/lib/tracker-error";
 
-type SessionSearch = {
-  area?: string;
-};
-
 export const Route = createFileRoute("/session")({
-  validateSearch: (search): SessionSearch => ({
-    area: typeof search.area === "string" ? search.area : undefined,
-  }),
   component: SessionRoute,
 });
 
 function SessionRoute() {
   const navigate = useNavigate();
-  const search = Route.useSearch();
   const { activeSession, isLoading, loadError, refreshTracker } =
     useTrackerData();
-  const [transitionSession, setTransitionSession] =
-    useState<ActiveSession | null>(null);
   const [screenError, setScreenError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const resolvedActiveSession = activeSession ?? transitionSession;
 
   useEffect(() => {
-    if (activeSession) {
-      setTransitionSession(null);
-    }
-  }, [activeSession]);
-
-  useEffect(() => {
-    if (!resolvedActiveSession) {
+    if (!activeSession) {
       return;
     }
 
@@ -56,22 +37,13 @@ function SessionRoute() {
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [resolvedActiveSession]);
+  }, [activeSession]);
 
   useEffect(() => {
-    if (isLoading) {
-      return;
-    }
-
-    if (resolvedActiveSession && search.area) {
-      void navigate({ to: "/session", search: {}, replace: true });
-      return;
-    }
-
-    if (!resolvedActiveSession && !search.area && !busyAction) {
+    if (!isLoading && !activeSession && !busyAction) {
       void navigate({ to: "/", replace: true });
     }
-  }, [busyAction, isLoading, navigate, resolvedActiveSession, search.area]);
+  }, [activeSession, busyAction, isLoading, navigate]);
 
   const runAction = async (busyKey: string, action: () => Promise<void>) => {
     setBusyAction(busyKey);
@@ -87,32 +59,17 @@ function SessionRoute() {
   };
 
   const handleToggleRun = () => {
-    if (!resolvedActiveSession && !search.area) {
+    if (!activeSession) {
       return;
     }
 
     void runAction(
-      resolvedActiveSession?.activeRun ? "finish-run" : "start-run",
+      activeSession.activeRun ? "finish-run" : "start-run",
       async () => {
-        if (search.area && !resolvedActiveSession) {
-          const createdSession = await createSessionAndStartRun(search.area);
-          setTransitionSession(createdSession);
-          void navigate({ to: "/session", search: {}, replace: true });
-          await refreshTracker();
-          return;
-        }
-
-        if (!resolvedActiveSession) {
-          return;
-        }
-
-        if (resolvedActiveSession.activeRun) {
-          await completeRun(
-            resolvedActiveSession.activeRun.id,
-            resolvedActiveSession.id,
-          );
+        if (activeSession.activeRun) {
+          await completeRun(activeSession.activeRun.id, activeSession.id);
         } else {
-          await startRun(resolvedActiveSession.id);
+          await startRun(activeSession.id);
         }
 
         await refreshTracker();
@@ -121,38 +78,35 @@ function SessionRoute() {
   };
 
   const handleCancelRun = () => {
-    const activeRun = resolvedActiveSession?.activeRun;
-
-    if (!resolvedActiveSession || !activeRun) {
+    if (!activeSession?.activeRun) {
       return;
     }
 
-    void runAction("cancel-run", async () => {
-      await cancelRun(activeRun.id, resolvedActiveSession.id);
-      await refreshTracker();
+    const activeRun = activeSession.activeRun;
+    const sessionId = activeSession.id;
 
-      if (resolvedActiveSession.completedRuns.length === 0) {
-        void navigate({ to: "/", replace: true });
-      }
+    void runAction("cancel-run", async () => {
+      await cancelRun(activeRun.id, sessionId);
+      await refreshTracker();
     });
   };
 
   const handleEndSession = () => {
-    if (!resolvedActiveSession) {
+    if (!activeSession) {
       return;
     }
 
     void runAction("end-session", async () => {
-      const activeRun = resolvedActiveSession.activeRun;
+      const activeRun = activeSession.activeRun;
 
       if (activeRun) {
-        await completeRun(activeRun.id, resolvedActiveSession.id);
+        await completeRun(activeRun.id, activeSession.id);
       }
 
-      if (!activeRun && resolvedActiveSession.completedRuns.length === 0) {
-        await discardSession(resolvedActiveSession.id);
+      if (!activeRun && activeSession.completedRuns.length === 0) {
+        await discardSession(activeSession.id);
       } else {
-        await endSession(resolvedActiveSession.id);
+        await endSession(activeSession.id);
       }
 
       await refreshTracker();
@@ -163,15 +117,10 @@ function SessionRoute() {
   return (
     <TrackerShell error={screenError ?? loadError}>
       <ActiveSessionScreen
-        activeSession={resolvedActiveSession}
+        activeSession={activeSession}
         busyAction={busyAction}
-        draftAreaName={search.area}
         now={now}
         onCancelRun={handleCancelRun}
-        onDiscardDraft={() => {
-          setScreenError(null);
-          void navigate({ to: "/", replace: true });
-        }}
         onEndSession={handleEndSession}
         onToggleRun={handleToggleRun}
       />

@@ -181,9 +181,7 @@ export function AutoDetectPanel() {
 
   const handleStart = () => {
     if (!activeSession) {
-      setError(
-        "Start a session and click Start Run before enabling auto-detect.",
-      );
+      setError("Create a session before enabling auto-detect.");
       return;
     }
 
@@ -231,9 +229,9 @@ export function AutoDetectPanel() {
       ) : (
         <div className="border border-amber-500/60 bg-amber-500/10 px-4 py-3 text-sm text-amber-300">
           <p>
-            No active session. The session screen is only a draft until you
-            click <strong>Start Run</strong>; until then, run events are logged
-            here but are not written to the database.
+            No active session. Create a session first; auto-detect will start
+            the first run when you enter a game. Until then, run events are
+            logged here but are not written to the database.
           </p>
           <Button asChild className="tracker-action-secondary mt-2">
             <Link to="/new-session">Start a session</Link>

@@ -32,10 +32,8 @@ const SHORTCUTS = [
 type ActiveSessionScreenProps = {
   activeSession: ActiveSession | null;
   busyAction: string | null;
-  draftAreaName?: string;
   now: number;
   onCancelRun: () => void;
-  onDiscardDraft: () => void;
   onEndSession: () => void;
   onToggleRun: () => void;
 };
@@ -43,16 +41,17 @@ type ActiveSessionScreenProps = {
 export function ActiveSessionScreen({
   activeSession,
   busyAction,
-  draftAreaName,
   now,
   onCancelRun,
-  onDiscardDraft,
   onEndSession,
   onToggleRun,
 }: ActiveSessionScreenProps) {
-  const isDraft = !activeSession && !!draftAreaName;
-  const locationName = activeSession?.locationName ?? draftAreaName ?? "";
+  const locationName = activeSession?.locationName ?? "";
   const completedRuns = activeSession?.completedRuns ?? [];
+  const hasNoRuns =
+    activeSession !== null &&
+    activeSession.activeRun === null &&
+    activeSession.completedRuns.length === 0;
   const currentRunElapsedMs = activeSession?.activeRun
     ? now - parseSqliteDate(activeSession.activeRun.startedAt).getTime()
     : null;
@@ -157,7 +156,7 @@ export function ActiveSessionScreen({
         <section className="flex flex-col items-center gap-3 py-1 text-center">
           <Button
             className="tracker-action-primary h-11 min-w-50 gap-2 px-8 text-base sm:text-lg"
-            disabled={busyAction !== null}
+            disabled={busyAction !== null || !activeSession}
             onClick={onToggleRun}
           >
             <Zap className="size-4" />
@@ -210,9 +209,8 @@ export function ActiveSessionScreen({
             </div>
           ) : (
             <div className="tracker-copy-muted text-sm sm:text-base">
-              {isDraft
-                ? "This session has not started yet. Start your first run to begin tracking."
-                : "No completed runs yet. Start your first run to begin tracking."}
+              No completed runs yet. Start a run manually, or enable auto-detect
+              to start one when you enter a game.
             </div>
           )}
 
@@ -226,34 +224,32 @@ export function ActiveSessionScreen({
         </div>
       </section>
 
-      {isDraft ? (
-        <section>
+      <section>
+        {hasNoRuns ? (
           <Button
             variant="outline"
             className="tracker-action-secondary h-12 w-full gap-2 text-base"
             disabled={busyAction !== null}
-            onClick={onDiscardDraft}
+            onClick={onEndSession}
           >
             <XCircle className="size-4" />
-            Cancel
+            Discard Session
           </Button>
-        </section>
-      ) : (
-        <section>
+        ) : (
           <Button
             className="tracker-action-primary h-12 w-full gap-2 text-base"
             disabled={
               busyAction !== null ||
               activeSession?.activeRun !== null ||
-              completedRuns.length === 0
+              !activeSession
             }
             onClick={onEndSession}
           >
             <Trophy className="size-4" />
             End Session
           </Button>
-        </section>
-      )}
+        )}
+      </section>
     </div>
   );
 }

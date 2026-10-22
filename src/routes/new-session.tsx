@@ -4,6 +4,8 @@ import { useEffect, useMemo, useState } from "react";
 import { NewSessionScreen } from "@/components/tracker/NewSessionScreen";
 import { TrackerShell } from "@/components/tracker/TrackerShell";
 import { useTrackerData } from "@/hooks/useTrackerData";
+import { createSession } from "@/lib/tracker-db";
+import { getTrackerErrorMessage } from "@/lib/tracker-error";
 
 export const Route = createFileRoute("/new-session")({
   component: NewSessionRoute,
@@ -26,10 +28,11 @@ const POPULAR_AREA_NAMES = [
 
 function NewSessionRoute() {
   const navigate = useNavigate();
-  const { activeSession, farmLocations, isLoading, loadError } =
+  const { activeSession, farmLocations, isLoading, loadError, refreshTracker } =
     useTrackerData();
   const [areaName, setAreaName] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
 
   useEffect(() => {
     if (!isLoading && activeSession) {
@@ -47,7 +50,11 @@ function NewSessionRoute() {
     [farmLocations],
   );
 
-  const navigateToDraftSession = (nextAreaName: string) => {
+  const handleStartSession = async (nextAreaName: string) => {
+    if (isStarting) {
+      return;
+    }
+
     const trimmedAreaName = nextAreaName.trim();
 
     if (!trimmedAreaName) {
@@ -56,8 +63,17 @@ function NewSessionRoute() {
     }
 
     setFormError(null);
-    setAreaName("");
-    void navigate({ to: "/session", search: { area: trimmedAreaName } });
+    setIsStarting(true);
+
+    try {
+      await createSession(trimmedAreaName);
+      await refreshTracker();
+      void navigate({ to: "/session", replace: true });
+    } catch (error) {
+      setFormError(getTrackerErrorMessage(error));
+    } finally {
+      setIsStarting(false);
+    }
   };
 
   return (
@@ -65,6 +81,7 @@ function NewSessionRoute() {
       <NewSessionScreen
         areaName={areaName}
         error={formError}
+        isStarting={isStarting}
         popularAreas={popularAreas}
         onAreaNameChange={(value) => {
           setAreaName(value);
@@ -75,9 +92,12 @@ function NewSessionRoute() {
         onCancel={() => {
           void navigate({ to: "/" });
         }}
-        onSelectArea={navigateToDraftSession}
+        onSelectArea={(value) => {
+          setAreaName(value);
+          setFormError(null);
+        }}
         onStart={() => {
-          navigateToDraftSession(areaName);
+          void handleStartSession(areaName);
         }}
       />
     </TrackerShell>

@@ -9,6 +9,7 @@ import { SectionLabel } from "./SectionLabel";
 export function NewSessionScreen({
   areaName,
   error,
+  isStarting,
   popularAreas,
   onAreaNameChange,
   onCancel,
@@ -17,6 +18,7 @@ export function NewSessionScreen({
 }: {
   areaName: string;
   error: string | null;
+  isStarting: boolean;
   popularAreas: string[];
   onAreaNameChange: (value: string) => void;
   onCancel: () => void;
@@ -57,14 +59,16 @@ export function NewSessionScreen({
         <div className="grid gap-2 md:grid-cols-2">
           <Button
             className="tracker-action-primary h-12 gap-2 text-base"
+            disabled={isStarting}
             onClick={onStart}
           >
             <Play className="size-4" />
-            Start Session
+            {isStarting ? "Starting..." : "Start Session"}
           </Button>
           <Button
             variant="outline"
             className="tracker-action-secondary h-12 gap-2 text-base"
+            disabled={isStarting}
             onClick={onCancel}
           >
             <X className="size-4" />
@@ -82,6 +86,7 @@ export function NewSessionScreen({
                     type="button"
                     key={area}
                     className="tracker-popular-area flex items-center gap-2.5"
+                    disabled={isStarting}
                     onClick={() => onSelectArea(area)}
                   >
                     <MapPin className="size-3.5 shrink-0 text-muted-foreground/60" />
