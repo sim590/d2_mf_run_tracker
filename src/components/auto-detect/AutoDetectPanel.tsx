@@ -296,8 +296,8 @@ export function AutoDetectPanel() {
 
         <p className="text-sm text-muted-foreground">
           Bright on the character-select screen (for example the Diablo II logo)
-          and dark in game. It ends the active run and suppresses false starts
-          while you are in the menu.
+          and dark in game. It ends the active run when you return to the menu;
+          loading screens inside the game do not end the run.
         </p>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
