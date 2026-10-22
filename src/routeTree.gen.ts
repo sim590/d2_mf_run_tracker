@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as SessionRouteImport } from './routes/session'
 import { Route as NewSessionRouteImport } from './routes/new-session'
+import { Route as AutoDetectRouteImport } from './routes/auto-detect'
 import { Route as IndexRouteImport } from './routes/index'
 
 const SessionRoute = SessionRouteImport.update({
@@ -23,6 +24,11 @@ const NewSessionRoute = NewSessionRouteImport.update({
   path: '/new-session',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AutoDetectRoute = AutoDetectRouteImport.update({
+  id: '/auto-detect',
+  path: '/auto-detect',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
@@ -31,30 +37,34 @@ const IndexRoute = IndexRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/auto-detect': typeof AutoDetectRoute
   '/new-session': typeof NewSessionRoute
   '/session': typeof SessionRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/auto-detect': typeof AutoDetectRoute
   '/new-session': typeof NewSessionRoute
   '/session': typeof SessionRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/auto-detect': typeof AutoDetectRoute
   '/new-session': typeof NewSessionRoute
   '/session': typeof SessionRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/new-session' | '/session'
+  fullPaths: '/' | '/auto-detect' | '/new-session' | '/session'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/new-session' | '/session'
-  id: '__root__' | '/' | '/new-session' | '/session'
+  to: '/' | '/auto-detect' | '/new-session' | '/session'
+  id: '__root__' | '/' | '/auto-detect' | '/new-session' | '/session'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AutoDetectRoute: typeof AutoDetectRoute
   NewSessionRoute: typeof NewSessionRoute
   SessionRoute: typeof SessionRoute
 }
@@ -75,6 +85,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NewSessionRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/auto-detect': {
+      id: '/auto-detect'
+      path: '/auto-detect'
+      fullPath: '/auto-detect'
+      preLoaderRoute: typeof AutoDetectRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/': {
       id: '/'
       path: '/'
@@ -87,6 +104,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AutoDetectRoute: AutoDetectRoute,
   NewSessionRoute: NewSessionRoute,
   SessionRoute: SessionRoute,
 }
