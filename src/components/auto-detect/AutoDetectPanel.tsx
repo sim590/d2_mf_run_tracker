@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import {
   type AutoDetectStatus,
   capturePreview,
+  DEFAULT_HUD_REGIONS,
   DEFAULT_MENU_ANCHOR,
   DEFAULT_MENU_REGION_PERCENT,
   DEFAULT_REGION_PERCENT,
@@ -16,6 +17,12 @@ import {
   findGameWindow,
   type GameWindowInfo,
   getAutoDetectStatus,
+  HUD_MARKERS,
+  HUD_REQUIRED_TEMPLATES,
+  HUD_THRESHOLD,
+  type HudMarkerName,
+  type HudTemplateResult,
+  type HudTemplateTest,
   type LiveMenuAnchor,
   listenRunEnd,
   listenRunStart,
@@ -28,6 +35,7 @@ import {
   type RegionPercent,
   startAutoDetect,
   stopAutoDetect,
+  testHudTemplates,
   testMenuTemplates,
 } from "@/lib/auto-detect";
 import { type ActiveSession, getActiveSession } from "@/lib/tracker-db";
@@ -173,6 +181,118 @@ function persistMenuCalibration(calibration: MenuCalibration | null) {
   }
 }
 
+type HudMarkerDraft = {
+  region: RegionPercent;
+  template: string | null;
+  result: HudTemplateResult | null;
+};
+
+type HudCalibrationEntry = {
+  name: string;
+  region: RegionPercent;
+  template: string;
+  threshold: number;
+  score: number;
+};
+
+type HudCalibration = {
+  templates: HudCalibrationEntry[];
+};
+
+const HUD_CALIBRATION_STORAGE_KEY = "d2mf-hud-calibration-v1";
+
+function isHudMarker(value: string): value is HudMarkerName {
+  return (HUD_MARKERS as readonly string[]).includes(value);
+}
+
+function emptyHudDrafts(): Record<HudMarkerName, HudMarkerDraft> {
+  const drafts = {} as Record<HudMarkerName, HudMarkerDraft>;
+  for (const marker of HUD_MARKERS) {
+    drafts[marker] = {
+      region: { ...DEFAULT_HUD_REGIONS[marker] },
+      template: null,
+      result: null,
+    };
+  }
+  return drafts;
+}
+
+function parseHudCalibrationEntry(value: unknown): HudCalibrationEntry | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const entry = value as Partial<HudCalibrationEntry>;
+  if (
+    typeof entry.name !== "string" ||
+    !isRegionPercent(entry.region) ||
+    typeof entry.template !== "string" ||
+    entry.template.length === 0 ||
+    typeof entry.threshold !== "number" ||
+    typeof entry.score !== "number"
+  ) {
+    return null;
+  }
+  return {
+    name: entry.name,
+    region: entry.region,
+    template: entry.template,
+    threshold: entry.threshold,
+    score: entry.score,
+  };
+}
+
+function loadHudCalibration(): HudCalibration | null {
+  try {
+    const raw = window.localStorage.getItem(HUD_CALIBRATION_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as { templates?: unknown } | null;
+    if (!parsed || !Array.isArray(parsed.templates)) {
+      return null;
+    }
+    const templates = parsed.templates
+      .map(parseHudCalibrationEntry)
+      .filter((entry): entry is HudCalibrationEntry => entry !== null);
+    return templates.length > 0 ? { templates } : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistHudCalibration(calibration: HudCalibration | null) {
+  try {
+    if (calibration) {
+      window.localStorage.setItem(
+        HUD_CALIBRATION_STORAGE_KEY,
+        JSON.stringify(calibration),
+      );
+    } else {
+      window.localStorage.removeItem(HUD_CALIBRATION_STORAGE_KEY);
+    }
+  } catch {
+    // localStorage may be unavailable; the calibration still works for this
+    // app session.
+  }
+}
+
+function hudDraftsFromCalibration(
+  calibration: HudCalibration | null,
+): Record<HudMarkerName, HudMarkerDraft> {
+  const drafts = emptyHudDrafts();
+  for (const entry of calibration?.templates ?? []) {
+    if (!isHudMarker(entry.name)) {
+      continue;
+    }
+    drafts[entry.name] = {
+      region: { ...entry.region },
+      template: entry.template,
+      result: null,
+    };
+  }
+  return drafts;
+}
+
 function isValidAnchorResult(result: MenuAnchorResult): boolean {
   return result.size > 0 && result.binary_score >= 0.3;
 }
@@ -206,6 +326,13 @@ function mergeAnchorCalibration(
     }
   }
   return { anchors };
+}
+
+function menuAnchorsVisible(anchors: LiveMenuAnchor[]): boolean {
+  const groups = ["left", "center", "right"] as const;
+  return groups.every((group) =>
+    anchors.some((anchor) => anchor.group === group && anchor.visible),
+  );
 }
 
 function formatLiveAnchors(anchors: LiveMenuAnchor[]): string {
@@ -247,6 +374,13 @@ export function AutoDetectPanel() {
     useState<MenuTemplateTest | null>(null);
   const [menuCalibration, setMenuCalibration] =
     useState<MenuCalibration | null>(() => loadMenuCalibration());
+  const [hudCalibration, setHudCalibration] = useState<HudCalibration | null>(
+    () => loadHudCalibration(),
+  );
+  const [hudDrafts, setHudDrafts] = useState<
+    Record<HudMarkerName, HudMarkerDraft>
+  >(() => hudDraftsFromCalibration(loadHudCalibration()));
+  const [hudTest, setHudTest] = useState<HudTemplateTest | null>(null);
   const [status, setStatus] = useState<AutoDetectStatus | null>(null);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(
     null,
@@ -507,6 +641,139 @@ export function AutoDetectPanel() {
     appendLog("menu calibration cleared");
   };
 
+  const updateHudRegion = (
+    marker: HudMarkerName,
+    key: keyof RegionPercent,
+    value: number,
+  ) => {
+    setHudDrafts((current) => ({
+      ...current,
+      [marker]: {
+        ...current[marker],
+        region: { ...current[marker].region, [key]: value },
+        // The captured template belongs to the previous region.
+        template: null,
+        result: null,
+      },
+    }));
+  };
+
+  const handleHudCapture = (marker: HudMarkerName) => {
+    void runAction(`hud-capture-${marker}`, async () => {
+      const draft = hudDrafts[marker];
+      const preview = await capturePreview(percentToNormalized(draft.region));
+      setWindowInfo(preview.window);
+      setHudDrafts((current) => ({
+        ...current,
+        [marker]: {
+          ...current[marker],
+          template: preview.image,
+          result: null,
+        },
+      }));
+      appendLog(
+        `${marker} template captured (${preview.window.width}x${preview.window.height})`,
+      );
+    });
+  };
+
+  const handleTestHudTemplates = () => {
+    void runAction("test-hud-templates", async () => {
+      const inputs = HUD_MARKERS.flatMap((marker) => {
+        const draft = hudDrafts[marker];
+        if (!draft.template) {
+          return [];
+        }
+        return [
+          {
+            name: marker,
+            region: percentToNormalized(draft.region),
+            template: draft.template,
+            threshold: HUD_THRESHOLD,
+          },
+        ];
+      });
+
+      if (inputs.length < HUD_REQUIRED_TEMPLATES) {
+        setError(
+          `Capture at least ${HUD_REQUIRED_TEMPLATES} HUD templates before testing.`,
+        );
+        return;
+      }
+
+      const result = await testHudTemplates(inputs);
+      setHudTest(result);
+      setWindowInfo(result.window);
+      setHudDrafts((current) => {
+        const next = { ...current };
+        for (const entry of result.results) {
+          if (isHudMarker(entry.name)) {
+            next[entry.name] = { ...next[entry.name], result: entry };
+          }
+        }
+        return next;
+      });
+      appendLog(
+        `HUD test: ${result.results.filter((entry) => entry.visible).length}/${result.results.length} visible -> ${result.hud_visible ? "in-game" : "not in-game"}`,
+      );
+    });
+  };
+
+  const handleSaveHudCalibration = () => {
+    const captured = HUD_MARKERS.flatMap((marker) => {
+      const draft = hudDrafts[marker];
+      if (!draft.template) {
+        return [];
+      }
+      return [
+        {
+          name: marker,
+          region: draft.region,
+          template: draft.template,
+          threshold: HUD_THRESHOLD,
+          score: draft.result?.score ?? 0,
+        },
+      ];
+    });
+
+    if (captured.length < HUD_REQUIRED_TEMPLATES) {
+      setError(
+        `Capture at least ${HUD_REQUIRED_TEMPLATES} HUD templates before saving.`,
+      );
+      return;
+    }
+
+    // Merge by name so the user can save markers one at a time.
+    const templates = [...(hudCalibration?.templates ?? [])];
+    for (const entry of captured) {
+      const index = templates.findIndex(
+        (template) => template.name === entry.name,
+      );
+      if (index >= 0) {
+        templates[index] = entry;
+      } else {
+        templates.push(entry);
+      }
+    }
+
+    const calibration: HudCalibration = { templates };
+    setHudCalibration(calibration);
+    persistHudCalibration(calibration);
+    appendLog(
+      `HUD calibration saved: ${captured
+        .map((entry) => `${entry.name} ${entry.score.toFixed(3)}`)
+        .join(", ")}`,
+    );
+  };
+
+  const handleClearHudCalibration = () => {
+    setHudCalibration(null);
+    persistHudCalibration(null);
+    setHudDrafts(emptyHudDrafts());
+    setHudTest(null);
+    appendLog("HUD calibration cleared");
+  };
+
   const handleStart = () => {
     if (!activeSession) {
       setError("Create a session before enabling auto-detect.");
@@ -530,22 +797,39 @@ export function AutoDetectPanel() {
         }))
       : [];
 
+    const savedHudTemplates = hudCalibration?.templates ?? [];
+    const hudTemplates =
+      savedHudTemplates.length >= HUD_REQUIRED_TEMPLATES
+        ? savedHudTemplates.map((template) => ({
+            name: template.name,
+            region: percentToNormalized(template.region),
+            template: template.template,
+            threshold: HUD_THRESHOLD,
+          }))
+        : [];
+
     void runAction("start", async () => {
       await startAutoDetect({
         loading_region: percentToNormalized(region),
         menu_region: menuEnabled ? percentToNormalized(menuRegion) : null,
         menu_templates: menuTemplates,
+        hud_templates: hudTemplates,
         dark_threshold: 22,
         dark_samples: 2,
         bright_samples: 2,
         menu_threshold: 50,
         menu_samples: 2,
         menu_dark_samples: menuTemplates.length > 0 ? 2 : 4,
+        hud_samples: 2,
         poll_interval_ms: 250,
         min_run_seconds: 3,
       });
       setStatus(await getAutoDetectStatus());
-      appendLog("auto-detect started");
+      appendLog(
+        hudTemplates.length > 0
+          ? `auto-detect started (${menuTemplates.length > 0 ? "combined menu + HUD" : "HUD only"})`
+          : "auto-detect started (menu/brightness only)",
+      );
     });
   };
 
@@ -581,6 +865,28 @@ export function AutoDetectPanel() {
       ? (menuTemplateTest?.results ?? []).filter(isValidAnchorResult)
       : [];
   const canSaveAll = validAllResults.length > 0;
+
+  const savedHudTemplates = hudCalibration?.templates ?? [];
+  const hudCombinedReady = savedHudTemplates.length >= HUD_REQUIRED_TEMPLATES;
+  const capturedHudCount = HUD_MARKERS.filter(
+    (marker) => hudDrafts[marker].template !== null,
+  ).length;
+  const hudScores = status?.last_hud_scores ?? [];
+  const hudVisibleCount = hudScores.filter((entry) => entry.visible).length;
+  const hudFrameVisible = status?.last_hud_visible ?? false;
+  const menuFrameVisible = menuAnchorsVisible(status?.last_menu_anchors ?? []);
+  const combinedSignal = hudFrameVisible
+    ? "in-game (HUD)"
+    : menuFrameVisible
+      ? "menu"
+      : "transition (phase kept)";
+  const startMode = hudCombinedReady
+    ? templateMenuReady
+      ? "Combined menu + HUD"
+      : "HUD only (menu calibration incomplete)"
+    : templateMenuReady
+      ? "Menu only (HUD calibration incomplete)"
+      : "Brightness fallback (no template calibration)";
 
   return (
     <div className="tracker-screen">
@@ -708,10 +1014,10 @@ export function AutoDetectPanel() {
 
         <p className="text-sm text-muted-foreground">
           Bright on the character-select screen (for example the Diablo II logo)
-          and dark in game. It ends the active run when you return to the menu,
-          and it starts a new run when you leave the menu. Loading screens
-          inside the game do not end the run. Values are percentages of the game
-          window.
+          and dark in game. It is only used when no menu or HUD template is
+          calibrated. It ends the active run when you return to the menu, and it
+          starts a new run when you leave the menu. Loading screens inside the
+          game do not end the run. Values are percentages of the game window.
         </p>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -764,19 +1070,20 @@ export function AutoDetectPanel() {
 
       <section className="tracker-section-panel space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="tracker-heading text-lg">Menu template test (font)</h2>
+          <h2 className="tracker-heading text-lg">Menu template (run end)</h2>
           <span className="border border-border/70 px-2 py-0.5 text-xs uppercase tracking-wide text-muted-foreground">
-            Diagnostic
+            Live run end
           </span>
         </div>
 
         <p className="text-sm text-muted-foreground">
-          Crop a single anchor text at a time (no neighbouring buttons). Each
-          anchor has its own default region at 2560x1440 and its own saved
-          region once calibrated. “All anchors” tests the five anchors
-          sequentially in their own regions, not all in one crop. Live menu
-          detection needs at least one visible left, one center and one right
-          anchor. Values are percentages of the game window.
+          The menu template is the fast run-end trigger. Crop a single anchor
+          text at a time (no neighbouring buttons). Each anchor has its own
+          default region at 2560x1440 and its own saved region once calibrated.
+          “All anchors” tests the five anchors sequentially in their own
+          regions, not all in one crop. Live detection needs at least one
+          visible left, one center and one right anchor, and the HUD must not be
+          visible. Values are percentages of the game window.
         </p>
 
         <div className="space-y-1.5">
@@ -1007,6 +1314,194 @@ export function AutoDetectPanel() {
 
       <section className="tracker-section-panel space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="tracker-heading text-lg">HUD template calibration</h2>
+          <span className="border border-border/70 px-2 py-0.5 text-xs uppercase tracking-wide text-muted-foreground">
+            Live signal
+          </span>
+        </div>
+
+        <p className="text-sm text-muted-foreground">
+          Capture the static life-orb frame, mana-orb frame and skill-bar frame
+          from the game (the orb numbers can be disabled; the frames stay). At
+          least two markers are required. The HUD confirms you are in game and
+          blocks the menu template from ending a run on an inventory tooltip.
+          Regions are percentages of the game window; the defaults match
+          2560x1440. Changing a region invalidates its captured template, so
+          capture again.
+        </p>
+
+        {HUD_MARKERS.map((marker) => {
+          const draft = hudDrafts[marker];
+          return (
+            <div key={marker} className="space-y-3 border border-border/50 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <span className="text-sm font-medium capitalize">{marker}</span>
+                {draft.result ? (
+                  <span
+                    className={
+                      draft.result.visible
+                        ? "font-mono text-sm text-emerald-400"
+                        : "font-mono text-sm text-muted-foreground"
+                    }
+                  >
+                    {draft.result.visible ? "visible" : "not visible"} - score{" "}
+                    {draft.result.score.toFixed(3)}
+                  </span>
+                ) : draft.template ? (
+                  <span className="text-xs text-muted-foreground">
+                    template captured, not tested
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                {(["x", "y", "width", "height"] as const).map((key) => (
+                  <div key={key} className="space-y-1.5">
+                    <Label htmlFor={`hud-${marker}-${key}`}>{key} (%)</Label>
+                    <Input
+                      className="h-10 text-sm"
+                      id={`hud-${marker}-${key}`}
+                      max={100}
+                      min={key === "width" || key === "height" ? 0.1 : 0}
+                      step={0.1}
+                      type="number"
+                      value={draft.region[key]}
+                      onChange={(event) =>
+                        updateHudRegion(marker, key, Number(event.target.value))
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <Button
+                  className="tracker-action-secondary"
+                  disabled={busy === `hud-capture-${marker}`}
+                  onClick={() => handleHudCapture(marker)}
+                >
+                  Capture template
+                </Button>
+                {draft.template ? (
+                  <span className="text-xs text-muted-foreground">
+                    Template captured. Adjust the region and capture again if
+                    the frame does not fill it.
+                  </span>
+                ) : null}
+              </div>
+
+              {draft.template ? (
+                <img
+                  alt={`${marker} HUD template`}
+                  className="max-h-40 w-full border border-border/70 bg-black object-contain"
+                  src={draft.template}
+                />
+              ) : null}
+
+              {draft.result ? (
+                <div className="grid grid-cols-3 gap-1 font-mono text-xs text-muted-foreground">
+                  <span>ncc {draft.result.ncc_score.toFixed(3)}</span>
+                  <span>bin {draft.result.binary_score.toFixed(3)}</span>
+                  <span>edge {draft.result.edge_score.toFixed(3)}</span>
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            className="tracker-action-secondary"
+            disabled={busy === "test-hud-templates"}
+            onClick={handleTestHudTemplates}
+          >
+            {busy === "test-hud-templates"
+              ? "Testing..."
+              : "Test HUD templates"}
+          </Button>
+          <Button
+            className="tracker-action-primary"
+            disabled={capturedHudCount < HUD_REQUIRED_TEMPLATES}
+            onClick={handleSaveHudCalibration}
+          >
+            Save HUD calibration
+          </Button>
+          {hudTest ? (
+            <span
+              className={
+                hudTest.hud_visible
+                  ? "text-sm text-emerald-400"
+                  : "text-sm text-muted-foreground"
+              }
+            >
+              {hudTest.results.filter((entry) => entry.visible).length}/
+              {hudTest.results.length} visible -&gt;{" "}
+              {hudTest.hud_visible ? "in-game" : "not in-game"}
+            </span>
+          ) : null}
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          The live decision uses max(edge, ncc) with a fixed 0.300 threshold.
+          The binary score is diagnostic only. Testing alone does not change run
+          detection.
+        </p>
+
+        <div
+          className={
+            hudCalibration
+              ? "space-y-1 border border-emerald-500/60 bg-emerald-500/10 p-3"
+              : "space-y-1 border border-border/50 p-3"
+          }
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span className="text-sm font-medium">
+              {hudCalibration
+                ? "Saved HUD calibration"
+                : "No saved HUD calibration"}
+            </span>
+            {hudCalibration ? (
+              <Button
+                className="tracker-action-secondary"
+                onClick={handleClearHudCalibration}
+              >
+                Clear
+              </Button>
+            ) : null}
+          </div>
+          {hudCalibration ? (
+            <>
+              <div className="text-xs text-muted-foreground">
+                {savedHudTemplates
+                  .map(
+                    (template) =>
+                      `${template.name} ${template.score.toFixed(3)} @ ${template.region.x}/${template.region.y}/${template.region.width}x${template.region.height}%`,
+                  )
+                  .join(" | ")}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {hudCombinedReady
+                  ? "Combined detection is available: the menu ends runs fast and the HUD keeps the detector in game during inventory, tooltips and teleports."
+                  : `Combined detection needs at least ${HUD_REQUIRED_TEMPLATES} saved markers. The menu-only detector is used meanwhile.`}
+              </p>
+            </>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Without HUD calibration the menu-only detector runs. Capture at
+              least {HUD_REQUIRED_TEMPLATES} markers to enable the combined
+              detector.
+            </p>
+          )}
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          Resolution or UI-scale changes require recalibration: the template
+          pixels no longer line up with the captured region.
+        </p>
+      </section>
+
+      <section className="tracker-section-panel space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="tracker-heading text-lg">Detection</h2>
           <div className="flex gap-2">
             <Button
@@ -1028,22 +1523,43 @@ export function AutoDetectPanel() {
           </div>
         </div>
 
+        <p className="text-xs text-muted-foreground">Start mode: {startMode}</p>
+
         <div className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
           <div>Running: {status?.running ? "yes" : "no"}</div>
           <div>Phase: {status?.phase ?? "unknown"}</div>
-          <div>
-            Last brightness: {status?.last_brightness?.toFixed(1) ?? "none"}
-          </div>
-          <div>
-            Menu brightness:{" "}
-            {status?.last_menu_brightness?.toFixed(1) ?? "none"}
-          </div>
+          <div>Combined signal: {combinedSignal}</div>
+          <div>Last event: {status?.last_event ?? "none"}</div>
           <div>
             Menu template score: {status?.last_menu_score?.toFixed(3) ?? "none"}
           </div>
-          <div>Last event: {status?.last_event ?? "none"}</div>
+          <div>
+            HUD:{" "}
+            {hudScores.length > 0
+              ? `${hudVisibleCount}/${hudScores.length} -> ${hudFrameVisible ? "in-game" : "not in-game"}`
+              : "not calibrated"}
+          </div>
           <div className="sm:col-span-2">
             Menu anchors: {formatLiveAnchors(status?.last_menu_anchors ?? [])}
+          </div>
+          <div className="sm:col-span-2">
+            HUD scores:{" "}
+            {hudScores.length > 0
+              ? hudScores
+                  .map(
+                    (entry) =>
+                      `${entry.name} ${entry.score.toFixed(3)}${entry.visible ? "" : " (off)"}`,
+                  )
+                  .join(", ")
+              : "none"}
+          </div>
+          <div className="sm:col-span-2">
+            Last brightness: {status?.last_brightness?.toFixed(1) ?? "none"}
+          </div>
+          <div className="sm:col-span-2">
+            Menu brightness:{" "}
+            {status?.last_menu_brightness?.toFixed(1) ?? "none"} (brightness
+            fallback only)
           </div>
           <div className="sm:col-span-2">
             Last error: {status?.last_error ?? "none"}

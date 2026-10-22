@@ -9,10 +9,11 @@ use tauri_plugin_sql::{Migration, MigrationKind};
 mod auto_detect;
 
 use auto_detect::{
-    menu_groups_visible, AutoDetectConfig, AutoDetectStatus, CaptureBackend, DetectorEvent,
-    GameWindowInfo, LiveMenuAnchor, LoadingDetector, MenuAnchorGroup, MenuTemplateConfig,
-    MenuTemplateMatcher, MenuTemplateTest, NormalizedRegion, Preview, RunEndPayload,
-    RunStartPayload, X11Backend,
+    hud_visible, menu_groups_visible, required_visible, AutoDetectConfig, AutoDetectStatus,
+    CaptureBackend, CombinedDetector, DetectorEvent, GameWindowInfo, HudTemplateConfig,
+    HudTemplateMatcher, HudTemplateResult, HudTemplateTest, LiveMenuAnchor, LoadingDetector,
+    MenuAnchorGroup, MenuTemplateConfig, MenuTemplateMatcher, MenuTemplateTest, NormalizedRegion,
+    Preview, RunEndPayload, RunStartPayload, X11Backend,
 };
 
 struct AutoDetectHandle {
@@ -196,6 +197,49 @@ fn run_menu_template_test(
     })
 }
 
+/// One-shot diagnostic: capture each HUD region on the current game window and
+/// score the calibrated image template against it. Does not touch run
+/// detection.
+#[tauri::command]
+async fn test_hud_templates(templates: Vec<HudTemplateConfig>) -> Result<HudTemplateTest, String> {
+    tauri::async_runtime::spawn_blocking(move || run_hud_template_test(templates))
+        .await
+        .map_err(|error| format!("HUD template task failed: {error}"))?
+}
+
+fn run_hud_template_test(templates: Vec<HudTemplateConfig>) -> Result<HudTemplateTest, String> {
+    if templates.is_empty() {
+        return Err("no HUD templates were provided".to_string());
+    }
+
+    let mut matchers = Vec::with_capacity(templates.len());
+    for template in &templates {
+        matchers.push(HudTemplateMatcher::new(template)?);
+    }
+
+    let backend = X11Backend::new().map_err(|error| error.to_string())?;
+    let window = backend
+        .find_game_window()
+        .map_err(|error| error.to_string())?;
+
+    let mut results = Vec::with_capacity(matchers.len());
+    for matcher in &matchers {
+        let pixels = matcher.region().to_pixels(&window);
+        let captured = backend
+            .capture_region(&window, pixels)
+            .map_err(|error| format!("{}: {error}", matcher.name()))?;
+        results.push(matcher.score(&captured.to_luma8()));
+    }
+
+    let hud_visible = hud_visible(&results, required_visible(matchers.len()));
+
+    Ok(HudTemplateTest {
+        window,
+        results,
+        hud_visible,
+    })
+}
+
 fn stop_auto_detect(state: &AppState) -> Result<(), String> {
     let mut guard = state
         .auto_detect
@@ -252,6 +296,120 @@ struct ActiveMenuTemplate {
     group: MenuAnchorGroup,
 }
 
+struct MenuFrame {
+    visible: bool,
+    max_score: f32,
+    anchors: Vec<LiveMenuAnchor>,
+    error: Option<String>,
+}
+
+/// Capture and score every menu anchor for one frame.
+fn capture_menu_frame(
+    backend: &X11Backend,
+    window: &GameWindowInfo,
+    templates: &[ActiveMenuTemplate],
+) -> MenuFrame {
+    let mut anchors = Vec::with_capacity(templates.len());
+    let mut capture_errors = Vec::new();
+    let mut left_visible = false;
+    let mut center_visible = false;
+    let mut right_visible = false;
+    let mut captured_any = false;
+    let mut max_score = 0.0_f32;
+
+    for template in templates {
+        let menu_pixels = template.config.region.to_pixels(window);
+        match backend.capture_region(window, menu_pixels) {
+            Ok(menu_image) => {
+                captured_any = true;
+                let score = template.matcher.score(&menu_image.to_luma8());
+                let visible = score >= template.config.threshold;
+                max_score = max_score.max(score);
+                match template.group {
+                    MenuAnchorGroup::Left => left_visible |= visible,
+                    MenuAnchorGroup::Center => center_visible |= visible,
+                    MenuAnchorGroup::Right => right_visible |= visible,
+                }
+                anchors.push(LiveMenuAnchor {
+                    text: template.config.text.clone(),
+                    group: template.group.as_str().to_string(),
+                    score,
+                    visible,
+                });
+            }
+            Err(error) => {
+                // Skip this anchor for the frame; the other groups may still
+                // be captured.
+                capture_errors.push(format!("{}: {error}", template.config.text));
+            }
+        }
+    }
+
+    if !captured_any {
+        return MenuFrame {
+            visible: false,
+            max_score: 0.0,
+            anchors,
+            error: Some(format!(
+                "no menu template region could be captured ({})",
+                capture_errors.join("; ")
+            )),
+        };
+    }
+
+    MenuFrame {
+        visible: menu_groups_visible(left_visible, center_visible, right_visible),
+        max_score,
+        anchors,
+        error: if capture_errors.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "menu template capture failed for {}",
+                capture_errors.join("; ")
+            ))
+        },
+    }
+}
+
+struct HudFrame {
+    results: Vec<HudTemplateResult>,
+    visible: bool,
+    error: Option<String>,
+}
+
+/// Capture and score every HUD marker for one frame.
+fn capture_hud_frame(
+    backend: &X11Backend,
+    window: &GameWindowInfo,
+    templates: &[HudTemplateMatcher],
+) -> HudFrame {
+    let mut results = Vec::with_capacity(templates.len());
+    let mut capture_errors = Vec::new();
+
+    for template in templates {
+        let pixels = template.region().to_pixels(window);
+        match backend.capture_region(window, pixels) {
+            Ok(image) => results.push(template.score(&image.to_luma8())),
+            Err(error) => capture_errors.push(format!("{}: {error}", template.name())),
+        }
+    }
+
+    let required = required_visible(templates.len());
+    HudFrame {
+        visible: hud_visible(&results, required),
+        results,
+        error: if capture_errors.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "HUD template capture failed for {}",
+                capture_errors.join("; ")
+            ))
+        },
+    }
+}
+
 fn run_auto_detect(
     app: tauri::AppHandle,
     config: AutoDetectConfig,
@@ -275,7 +433,7 @@ fn run_auto_detect(
             return;
         }
     };
-    let mut detector = LoadingDetector::new(config.detector_config());
+    let mut loading_detector = LoadingDetector::new(config.detector_config());
     let mut error_count = 0u32;
     let mut last_window_refresh = Instant::now();
 
@@ -310,6 +468,31 @@ fn run_auto_detect(
         }
     }
 
+    let mut hud_templates: Vec<HudTemplateMatcher> = Vec::new();
+    for template in &config.hud_templates {
+        match HudTemplateMatcher::new(template) {
+            Ok(matcher) => hud_templates.push(matcher),
+            Err(error) => {
+                let message = format!(
+                    "HUD template '{}' is invalid ({error}); skipping it",
+                    template.name
+                );
+                set_status_error(&status, message.clone());
+                template_config_error.get_or_insert(message);
+            }
+        }
+    }
+
+    let menu_ready = !menu_templates.is_empty();
+    let hud_ready = !hud_templates.is_empty();
+    // The combined detector runs whenever HUD templates are configured; it uses
+    // the menu signal when the menu is calibrated, and the HUD alone otherwise.
+    let use_combined = hud_ready;
+    let mut combined_config = config.combined_detector_config();
+    combined_config.hud_missing_ends_run = !menu_ready;
+    let mut combined_detector = CombinedDetector::new(combined_config);
+    let event_source = if use_combined { "combined" } else { "screen" };
+
     while !stop.load(Ordering::Relaxed) {
         if last_window_refresh.elapsed() >= Duration::from_secs(5) {
             if let Ok(found) = backend.find_game_window() {
@@ -322,89 +505,72 @@ fn run_auto_detect(
             Ok(image) => {
                 error_count = 0;
                 let brightness = image.mean_brightness();
-                let (
-                    menu_signal,
-                    status_menu_brightness,
-                    last_menu_score,
-                    last_menu_anchors,
-                    probe_error,
-                ) = if menu_templates.is_empty() {
-                    let (brightness, error) =
-                        menu_brightness_probe(&backend, &window, config.menu_region);
-                    (brightness, brightness, None, Vec::new(), error)
+                let menu_frame = if menu_ready {
+                    Some(capture_menu_frame(&backend, &window, &menu_templates))
                 } else {
-                    let mut anchors = Vec::with_capacity(menu_templates.len());
-                    let mut capture_errors = Vec::new();
-                    let mut left_visible = false;
-                    let mut center_visible = false;
-                    let mut right_visible = false;
-                    let mut captured_any = false;
-                    let mut max_score = 0.0_f32;
-
-                    for template in &menu_templates {
-                        let menu_pixels = template.config.region.to_pixels(&window);
-                        match backend.capture_region(&window, menu_pixels) {
-                            Ok(menu_image) => {
-                                captured_any = true;
-                                let score = template.matcher.score(&menu_image.to_luma8());
-                                let visible = score >= template.config.threshold;
-                                max_score = max_score.max(score);
-                                match template.group {
-                                    MenuAnchorGroup::Left => left_visible |= visible,
-                                    MenuAnchorGroup::Center => center_visible |= visible,
-                                    MenuAnchorGroup::Right => right_visible |= visible,
-                                }
-                                anchors.push(LiveMenuAnchor {
-                                    text: template.config.text.clone(),
-                                    group: template.group.as_str().to_string(),
-                                    score,
-                                    visible,
-                                });
-                            }
-                            Err(error) => {
-                                // Skip this anchor for the frame; the other
-                                // groups may still be captured.
-                                capture_errors.push(format!("{}: {error}", template.config.text));
-                            }
-                        }
-                    }
-
-                    if captured_any {
-                        let menu_visible =
-                            menu_groups_visible(left_visible, center_visible, right_visible);
-                        let error = if capture_errors.is_empty() {
-                            None
-                        } else {
-                            Some(format!(
-                                "menu template capture failed for {}",
-                                capture_errors.join("; ")
-                            ))
-                        };
-                        (
-                            Some(if menu_visible { 100.0 } else { 0.0 }),
-                            None,
-                            Some(max_score),
-                            anchors,
-                            error,
-                        )
-                    } else {
-                        let (brightness, fallback_error) =
-                            menu_brightness_probe(&backend, &window, config.menu_region);
-                        let mut message = format!(
-                            "no menu template region could be captured ({})",
-                            capture_errors.join("; ")
-                        );
-                        if let Some(fallback) = fallback_error {
-                            message.push_str(&format!("; brightness fallback failed: {fallback}"));
-                        } else {
-                            message.push_str("; using brightness fallback");
-                        }
-                        (brightness, brightness, None, Vec::new(), Some(message))
-                    }
+                    None
                 };
-                let menu_error = probe_error.or_else(|| template_config_error.clone());
-                let events = detector.process_with_menu(brightness, menu_signal, Instant::now());
-                let phase = detector.phase().as_str().to_string();
+                let hud_frame = if hud_ready {
+                    Some(capture_hud_frame(&backend, &window, &hud_templates))
+                } else {
+                    None
+                };
+
+                let mut status_menu_brightness: Option<f32> = None;
+                let mut last_menu_score: Option<f32> = None;
+                let mut last_menu_anchors: Vec<LiveMenuAnchor> = Vec::new();
+                let mut probe_error: Option<String> = None;
+                let events;
+                let phase;
+
+                if use_combined {
+                    let menu_visible = menu_frame.as_ref().is_some_and(|frame| frame.visible);
+                    let hud_is_visible = hud_frame.as_ref().is_some_and(|frame| frame.visible);
+                    events =
+                        combined_detector.process(menu_visible, hud_is_visible, Instant::now());
+                    phase = combined_detector.phase().as_str().to_string();
+                    if let Some(frame) = &menu_frame {
+                        last_menu_score = Some(frame.max_score);
+                        last_menu_anchors = frame.anchors.clone();
+                        probe_error = frame.error.clone();
+                    }
+                } else if menu_ready {
+                    let frame = menu_frame
+                        .as_ref()
+                        .expect("a menu frame is captured when the menu is ready");
+                    let menu_signal = if frame.visible { 100.0 } else { 0.0 };
+                    events = loading_detector.process_with_menu(
+                        brightness,
+                        Some(menu_signal),
+                        Instant::now(),
+                    );
+                    phase = loading_detector.phase().as_str().to_string();
+                    last_menu_score = Some(frame.max_score);
+                    last_menu_anchors = frame.anchors.clone();
+                    probe_error = frame.error.clone();
+                } else {
+                    let (menu_brightness, error) =
+                        menu_brightness_probe(&backend, &window, config.menu_region);
+                    status_menu_brightness = menu_brightness;
+                    probe_error = error;
+                    events = loading_detector.process_with_menu(
+                        brightness,
+                        menu_brightness,
+                        Instant::now(),
+                    );
+                    phase = loading_detector.phase().as_str().to_string();
+                }
+
+                let hud_error = hud_frame.as_ref().and_then(|frame| frame.error.clone());
+                let last_hud_visible = hud_frame.as_ref().map(|frame| frame.visible);
+                let last_hud_scores = hud_frame.map(|frame| frame.results).unwrap_or_default();
+                let mut menu_error = probe_error.or_else(|| template_config_error.clone());
+                if let Some(error) = hud_error {
+                    menu_error = Some(match menu_error {
+                        Some(existing) => format!("{existing}; {error}"),
+                        None => error,
+                    });
+                }
 
                 update_status(&status, |current| {
                     current.running = true;
@@ -413,6 +579,8 @@ fn run_auto_detect(
                     current.last_menu_brightness = status_menu_brightness;
                     current.last_menu_score = last_menu_score;
                     current.last_menu_anchors = last_menu_anchors;
+                    current.last_hud_visible = last_hud_visible;
+                    current.last_hud_scores = last_hud_scores;
                     current.phase = phase;
                     current.last_error = menu_error;
                 });
@@ -426,7 +594,7 @@ fn run_auto_detect(
                             let _ = app.emit(
                                 "auto-detect://run-start",
                                 RunStartPayload {
-                                    source: "screen".into(),
+                                    source: event_source.into(),
                                 },
                             );
                         }
@@ -442,7 +610,7 @@ fn run_auto_detect(
                                 RunEndPayload {
                                     duration_ms: duration.as_millis() as u64,
                                     too_short,
-                                    source: "screen".into(),
+                                    source: event_source.into(),
                                 },
                             );
                         }
@@ -507,7 +675,8 @@ pub fn run() {
             auto_detect_status,
             find_game_window,
             capture_preview,
-            test_menu_templates
+            test_menu_templates,
+            test_hud_templates
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

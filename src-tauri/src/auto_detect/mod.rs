@@ -6,7 +6,10 @@
 //! run-end events and lets the frontend decide how to persist them.
 
 pub mod capture;
+pub mod combined_detector;
 pub mod detector;
+pub mod hud_template;
+pub(crate) mod matching;
 pub mod menu_template;
 pub mod x11;
 
@@ -15,7 +18,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 pub use capture::{CaptureBackend, GameWindowInfo, NormalizedRegion};
+pub use combined_detector::{CombinedDetector, CombinedDetectorConfig};
 pub use detector::{DetectorConfig, DetectorEvent, LoadingDetector, Phase};
+pub use hud_template::{hud_visible, required_visible, HudTemplateMatcher};
 pub use menu_template::{
     menu_groups_visible, MenuAnchorGroup, MenuAnchorResult, MenuTemplateMatcher,
 };
@@ -34,18 +39,30 @@ pub struct MenuTemplateConfig {
     pub threshold: f32,
 }
 
+/// One calibrated HUD image template. `template` is a PNG data URL captured
+/// from the live game through `capture_preview`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HudTemplateConfig {
+    pub name: String,
+    pub region: NormalizedRegion,
+    pub template: String,
+    pub threshold: f32,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AutoDetectConfig {
     pub loading_region: NormalizedRegion,
     pub menu_region: Option<NormalizedRegion>,
     pub menu_templates: Vec<MenuTemplateConfig>,
+    pub hud_templates: Vec<HudTemplateConfig>,
     pub dark_threshold: f32,
     pub dark_samples: u32,
     pub bright_samples: u32,
     pub menu_threshold: f32,
     pub menu_samples: u32,
     pub menu_dark_samples: u32,
+    pub hud_samples: u32,
     pub poll_interval_ms: u64,
     pub min_run_seconds: f64,
 }
@@ -56,12 +73,14 @@ impl Default for AutoDetectConfig {
             loading_region: NormalizedRegion::default(),
             menu_region: None,
             menu_templates: Vec::new(),
+            hud_templates: Vec::new(),
             dark_threshold: 22.0,
             dark_samples: 2,
             bright_samples: 2,
             menu_threshold: 50.0,
             menu_samples: 2,
             menu_dark_samples: 4,
+            hud_samples: 2,
             poll_interval_ms: 250,
             min_run_seconds: 3.0,
         }
@@ -80,6 +99,15 @@ impl AutoDetectConfig {
             min_run_duration: Duration::from_secs_f64(self.min_run_seconds.max(0.0)),
         }
     }
+
+    pub fn combined_detector_config(&self) -> CombinedDetectorConfig {
+        CombinedDetectorConfig {
+            menu_samples: self.menu_samples.max(1),
+            hud_samples: self.hud_samples.max(1),
+            min_run_duration: Duration::from_secs_f64(self.min_run_seconds.max(0.0)),
+            hud_missing_ends_run: false,
+        }
+    }
 }
 
 /// One anchor sampled by the live multi-anchor menu detector.
@@ -91,6 +119,20 @@ pub struct LiveMenuAnchor {
     pub visible: bool,
 }
 
+/// One scored HUD marker for the live status and the diagnostic test.
+#[derive(Debug, Clone, Serialize)]
+pub struct HudTemplateResult {
+    pub name: String,
+    /// Combined HUD score: the best of the intensity and edge NCCs.
+    pub score: f32,
+    pub ncc_score: f32,
+    pub binary_score: f32,
+    pub edge_score: f32,
+    pub visible: bool,
+    pub x: u32,
+    pub y: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AutoDetectStatus {
     pub running: bool,
@@ -99,6 +141,8 @@ pub struct AutoDetectStatus {
     pub last_menu_brightness: Option<f32>,
     pub last_menu_score: Option<f32>,
     pub last_menu_anchors: Vec<LiveMenuAnchor>,
+    pub last_hud_visible: Option<bool>,
+    pub last_hud_scores: Vec<HudTemplateResult>,
     pub phase: String,
     pub last_error: Option<String>,
     pub last_event: Option<String>,
@@ -113,6 +157,8 @@ impl Default for AutoDetectStatus {
             last_menu_brightness: None,
             last_menu_score: None,
             last_menu_anchors: Vec::new(),
+            last_hud_visible: None,
+            last_hud_scores: Vec::new(),
             phase: Phase::Unknown.as_str().to_string(),
             last_error: None,
             last_event: None,
@@ -133,6 +179,14 @@ pub struct MenuTemplateTest {
     pub window: GameWindowInfo,
     pub preview: String,
     pub results: Vec<MenuAnchorResult>,
+}
+
+/// Diagnostic result for the HUD image template test.
+#[derive(Debug, Clone, Serialize)]
+pub struct HudTemplateTest {
+    pub window: GameWindowInfo,
+    pub results: Vec<HudTemplateResult>,
+    pub hud_visible: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

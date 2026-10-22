@@ -40,16 +40,44 @@ export type MenuTemplateConfig = {
   threshold: number;
 };
 
+export type HudTemplateConfig = {
+  name: string;
+  region: NormalizedRegion;
+  template: string;
+  threshold: number;
+};
+
+export type HudTemplateInput = HudTemplateConfig;
+
+export type HudTemplateResult = {
+  name: string;
+  score: number;
+  ncc_score: number;
+  binary_score: number;
+  edge_score: number;
+  visible: boolean;
+  x: number;
+  y: number;
+};
+
+export type HudTemplateTest = {
+  window: GameWindowInfo;
+  results: HudTemplateResult[];
+  hud_visible: boolean;
+};
+
 export type AutoDetectConfig = {
   loading_region: NormalizedRegion;
   menu_region: NormalizedRegion | null;
   menu_templates: MenuTemplateConfig[];
+  hud_templates: HudTemplateConfig[];
   dark_threshold: number;
   dark_samples: number;
   bright_samples: number;
   menu_threshold: number;
   menu_samples: number;
   menu_dark_samples: number;
+  hud_samples: number;
   poll_interval_ms: number;
   min_run_seconds: number;
 };
@@ -68,6 +96,8 @@ export type AutoDetectStatus = {
   last_menu_brightness: number | null;
   last_menu_score: number | null;
   last_menu_anchors: LiveMenuAnchor[];
+  last_hud_visible: boolean | null;
+  last_hud_scores: HudTemplateResult[];
   phase: string;
   last_error: string | null;
   last_event: string | null;
@@ -154,6 +184,28 @@ export const DEFAULT_MENU_ANCHOR_REGIONS: Record<
 
 export const DEFAULT_MENU_ANCHOR: MenuAnchorText = MENU_ANCHOR_OPTIONS[0];
 
+export type HudMarkerName = "life orb" | "mana orb" | "skill bar";
+
+export const HUD_MARKERS: readonly HudMarkerName[] = [
+  "life orb",
+  "mana orb",
+  "skill bar",
+] as const;
+
+/// Fixed HUD decision threshold. The live decision uses max(edge, ncc).
+export const HUD_THRESHOLD = 0.3;
+
+/// At least two of the three markers must be visible.
+export const HUD_REQUIRED_TEMPLATES = 2;
+
+// Starting points for 2560x1440. The template is the whole captured region;
+// adjust the region until the static frame fills it, then capture again.
+export const DEFAULT_HUD_REGIONS: Record<HudMarkerName, RegionPercent> = {
+  "life orb": { x: 18, y: 80, width: 20, height: 12 },
+  "mana orb": { x: 78, y: 80, width: 20, height: 12 },
+  "skill bar": { x: 30, y: 88, width: 40, height: 8 },
+};
+
 export function defaultMenuAnchorRegion(text: string): RegionPercent {
   return (
     DEFAULT_MENU_ANCHOR_REGIONS[text as MenuAnchorText] ??
@@ -187,6 +239,12 @@ export function testMenuTemplates(
   anchor: string | null,
 ): Promise<MenuTemplateTest> {
   return invoke<MenuTemplateTest>("test_menu_templates", { region, anchor });
+}
+
+export function testHudTemplates(
+  templates: HudTemplateInput[],
+): Promise<HudTemplateTest> {
+  return invoke<HudTemplateTest>("test_hud_templates", { templates });
 }
 
 export function startAutoDetect(config: AutoDetectConfig): Promise<void> {
