@@ -5,6 +5,7 @@
 //! module is deliberately independent from the UI: it emits run-start and
 //! run-end events and lets the frontend decide how to persist them.
 
+pub mod capture;
 pub mod detector;
 pub mod x11;
 
@@ -12,8 +13,9 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub use capture::{CaptureBackend, GameWindowInfo, Region};
 pub use detector::{DetectorConfig, DetectorEvent, LoadingDetector, Phase};
-pub use x11::{CaptureBackend, GameWindowInfo, Region, X11Backend};
+pub use x11::X11Backend;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]

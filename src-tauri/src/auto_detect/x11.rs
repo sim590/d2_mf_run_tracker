@@ -5,113 +5,12 @@
 //! prompt, including when the window is on another workspace.
 
 use std::fmt;
-use std::io::Cursor;
 
-use base64::Engine as _;
-use serde::{Deserialize, Serialize};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _, ImageFormat, Window};
 use x11rb::rust_connection::RustConnection;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-pub struct Region {
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Default for Region {
-    fn default() -> Self {
-        Self {
-            x: 0,
-            y: 0,
-            width: 200,
-            height: 100,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GameWindowInfo {
-    pub id: u32,
-    pub title: String,
-    pub x: i32,
-    pub y: i32,
-    pub width: u32,
-    pub height: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct ImageData {
-    pub width: u32,
-    pub height: u32,
-    pub rgb: Vec<u8>,
-}
-
-impl ImageData {
-    pub fn mean_brightness(&self) -> f32 {
-        if self.rgb.is_empty() {
-            return 0.0;
-        }
-        let total: u64 = self.rgb.iter().map(|value| u64::from(*value)).sum();
-        (total as f64 / self.rgb.len() as f64) as f32
-    }
-
-    pub fn to_png_base64(&self) -> Result<String, CaptureError> {
-        let image = image::RgbImage::from_raw(self.width, self.height, self.rgb.clone())
-            .ok_or_else(|| CaptureError::Encode("invalid RGB buffer".into()))?;
-        let mut png = Vec::new();
-        image::DynamicImage::ImageRgb8(image)
-            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-            .map_err(|error| CaptureError::Encode(error.to_string()))?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(png);
-        Ok(format!("data:image/png;base64,{encoded}"))
-    }
-}
-
-#[derive(Debug)]
-pub enum CaptureError {
-    Connect(String),
-    WindowNotFound,
-    X11(String),
-    RegionOutOfBounds,
-    UnsupportedFormat(usize),
-    Encode(String),
-}
-
-impl fmt::Display for CaptureError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            CaptureError::Connect(message) => {
-                write!(formatter, "cannot connect to X11: {message}")
-            }
-            CaptureError::WindowNotFound => write!(formatter, "Diablo II window not found"),
-            CaptureError::X11(message) => write!(formatter, "X11 error: {message}"),
-            CaptureError::RegionOutOfBounds => {
-                write!(formatter, "capture region is outside the game window")
-            }
-            CaptureError::UnsupportedFormat(bytes) => {
-                write!(
-                    formatter,
-                    "unsupported pixel format ({bytes} bytes per pixel)"
-                )
-            }
-            CaptureError::Encode(message) => write!(formatter, "cannot encode preview: {message}"),
-        }
-    }
-}
-
-impl std::error::Error for CaptureError {}
-
-pub trait CaptureBackend {
-    fn find_game_window(&self) -> Result<GameWindowInfo, CaptureError>;
-    fn capture_region(
-        &self,
-        window: &GameWindowInfo,
-        region: Region,
-    ) -> Result<ImageData, CaptureError>;
-}
+use super::capture::{CaptureBackend, CaptureError, GameWindowInfo, ImageData, Region};
 
 pub struct X11Backend {
     connection: RustConnection,
@@ -320,33 +219,13 @@ fn intern_atom(connection: &RustConnection, name: &[u8]) -> Result<u32, CaptureE
 }
 
 fn x11_error(error: impl fmt::Display) -> CaptureError {
-    CaptureError::X11(error.to_string())
+    CaptureError::Backend(error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn mean_brightness_works() {
-        let image = ImageData {
-            width: 2,
-            height: 1,
-            rgb: vec![0, 0, 0, 255, 255, 255],
-        };
-        assert!((image.mean_brightness() - 127.5).abs() < 0.1);
-    }
-
-    #[test]
-    fn png_preview_has_data_url_prefix() {
-        let image = ImageData {
-            width: 1,
-            height: 1,
-            rgb: vec![255, 0, 0],
-        };
-        let png = image.to_png_base64().expect("png encoding");
-        assert!(png.starts_with("data:image/png;base64,"));
-    }
+    use super::X11Backend;
+    use crate::auto_detect::capture::{CaptureBackend, Region};
 
     #[test]
     #[ignore = "requires a running D2R XWayland window"]
