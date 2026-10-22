@@ -7,6 +7,7 @@
 
 pub mod capture;
 pub mod detector;
+pub mod menu_template;
 pub mod x11;
 
 use std::time::Duration;
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 pub use capture::{CaptureBackend, GameWindowInfo, NormalizedRegion};
 pub use detector::{DetectorConfig, DetectorEvent, LoadingDetector, Phase};
+pub use menu_template::MenuAnchorResult;
 pub use x11::X11Backend;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +95,14 @@ pub struct Preview {
     pub image: String,
     pub brightness: f32,
     pub window: GameWindowInfo,
+}
+
+/// Diagnostic result for the font-generated menu template test.
+#[derive(Debug, Clone, Serialize)]
+pub struct MenuTemplateTest {
+    pub window: GameWindowInfo,
+    pub preview: String,
+    pub results: Vec<MenuAnchorResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -63,6 +63,23 @@ export type RunEndPayload = {
   source: string;
 };
 
+export type MenuAnchorResult = {
+  text: string;
+  score: number;
+  size: number;
+  letter_spacing: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type MenuTemplateTest = {
+  window: GameWindowInfo;
+  preview: string;
+  results: MenuAnchorResult[];
+};
+
 export const DEFAULT_REGION_PERCENT: RegionPercent = {
   x: 45.9,
   y: 34.7,
@@ -75,6 +92,15 @@ export const DEFAULT_MENU_REGION_PERCENT: RegionPercent = {
   y: 13.89,
   width: 7.81,
   height: 6.94,
+};
+
+// Left column buttons at the character selection screen on a 2560x1440
+// window. Adjust if the game uses another resolution or UI scale.
+export const DEFAULT_MENU_ANCHOR_REGION_PERCENT: RegionPercent = {
+  x: 1.5,
+  y: 30,
+  width: 15,
+  height: 25,
 };
 
 export function percentToNormalized(region: RegionPercent): NormalizedRegion {
@@ -92,6 +118,12 @@ export function findGameWindow(): Promise<GameWindowInfo> {
 
 export function capturePreview(region: NormalizedRegion): Promise<Preview> {
   return invoke<Preview>("capture_preview", { region });
+}
+
+export function testMenuTemplates(
+  region: NormalizedRegion,
+): Promise<MenuTemplateTest> {
+  return invoke<MenuTemplateTest>("test_menu_templates", { region });
 }
 
 export function startAutoDetect(config: AutoDetectConfig): Promise<void> {

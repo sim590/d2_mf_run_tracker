@@ -10,7 +10,8 @@ mod auto_detect;
 
 use auto_detect::{
     AutoDetectConfig, AutoDetectStatus, CaptureBackend, DetectorEvent, GameWindowInfo,
-    LoadingDetector, NormalizedRegion, Preview, RunEndPayload, RunStartPayload, X11Backend,
+    LoadingDetector, MenuTemplateTest, NormalizedRegion, Preview, RunEndPayload, RunStartPayload,
+    X11Backend,
 };
 
 struct AutoDetectHandle {
@@ -141,6 +142,58 @@ fn capture_preview(region: NormalizedRegion) -> Result<Preview, String> {
         image,
         brightness,
         window,
+    })
+}
+
+/// One-shot diagnostic: render the menu anchors from the bundled Exocet font
+/// and score them against the captured region. Does not touch run detection.
+#[tauri::command]
+async fn test_menu_templates(region: NormalizedRegion) -> Result<MenuTemplateTest, String> {
+    tauri::async_runtime::spawn_blocking(move || run_menu_template_test(region))
+        .await
+        .map_err(|error| format!("menu template task failed: {error}"))?
+}
+
+fn run_menu_template_test(region: NormalizedRegion) -> Result<MenuTemplateTest, String> {
+    let backend = X11Backend::new().map_err(|error| error.to_string())?;
+    let window = backend
+        .find_game_window()
+        .map_err(|error| error.to_string())?;
+    let pixels = region.to_pixels(&window);
+    let captured = backend
+        .capture_region(&window, pixels)
+        .map_err(|error| error.to_string())?;
+
+    let gray = image::GrayImage::from_fn(captured.width, captured.height, |x, y| {
+        let offset = (y as usize * captured.width as usize + x as usize) * 3;
+        let red = f32::from(captured.rgb[offset]);
+        let green = f32::from(captured.rgb[offset + 1]);
+        let blue = f32::from(captured.rgb[offset + 2]);
+        let luma = (0.299 * red + 0.587 * green + 0.114 * blue).round();
+        image::Luma([luma.clamp(0.0, 255.0) as u8])
+    });
+
+    let results = auto_detect::menu_template::test_menu_templates(&gray);
+
+    let mut rgb = captured.rgb.clone();
+    auto_detect::menu_template::draw_debug_rectangles(
+        &mut rgb,
+        captured.width,
+        captured.height,
+        &results,
+    );
+    let preview = auto_detect::capture::ImageData {
+        width: captured.width,
+        height: captured.height,
+        rgb,
+    }
+    .to_png_base64()
+    .map_err(|error| error.to_string())?;
+
+    Ok(MenuTemplateTest {
+        window,
+        preview,
+        results,
     })
 }
 
@@ -328,7 +381,8 @@ pub fn run() {
             auto_detect_stop,
             auto_detect_status,
             find_game_window,
-            capture_preview
+            capture_preview,
+            test_menu_templates
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

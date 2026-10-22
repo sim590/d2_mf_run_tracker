@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import {
   type AutoDetectStatus,
   capturePreview,
+  DEFAULT_MENU_ANCHOR_REGION_PERCENT,
   DEFAULT_MENU_REGION_PERCENT,
   DEFAULT_REGION_PERCENT,
   findGameWindow,
@@ -16,11 +17,13 @@ import {
   getAutoDetectStatus,
   listenRunEnd,
   listenRunStart,
+  type MenuTemplateTest,
   type Preview,
   percentToNormalized,
   type RegionPercent,
   startAutoDetect,
   stopAutoDetect,
+  testMenuTemplates,
 } from "@/lib/auto-detect";
 import { type ActiveSession, getActiveSession } from "@/lib/tracker-db";
 import { AUTO_DETECT_STOPPED_EVENT } from "@/lib/tracker-events";
@@ -36,9 +39,14 @@ export function AutoDetectPanel() {
     DEFAULT_MENU_REGION_PERCENT,
   );
   const [menuEnabled, setMenuEnabled] = useState(true);
+  const [menuAnchorRegion, setMenuAnchorRegion] = useState<RegionPercent>(
+    DEFAULT_MENU_ANCHOR_REGION_PERCENT,
+  );
   const [windowInfo, setWindowInfo] = useState<GameWindowInfo | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [menuPreview, setMenuPreview] = useState<Preview | null>(null);
+  const [menuTemplateTest, setMenuTemplateTest] =
+    useState<MenuTemplateTest | null>(null);
   const [status, setStatus] = useState<AutoDetectStatus | null>(null);
   const [activeSession, setActiveSession] = useState<ActiveSession | null>(
     null,
@@ -179,6 +187,31 @@ export function AutoDetectPanel() {
     });
   };
 
+  const updateMenuAnchorRegion = (key: keyof RegionPercent, value: number) => {
+    setMenuAnchorRegion((current) => ({ ...current, [key]: value }));
+  };
+
+  const handleTestMenuTemplates = () => {
+    void runAction("test-menu-templates", async () => {
+      const result = await testMenuTemplates(
+        percentToNormalized(menuAnchorRegion),
+      );
+      setMenuTemplateTest(result);
+      setWindowInfo(result.window);
+      const best =
+        result.results.length > 0
+          ? result.results.reduce((current, entry) =>
+              entry.score > current.score ? entry : current,
+            )
+          : null;
+      appendLog(
+        best
+          ? `menu templates: ${best.text} ${best.score.toFixed(3)} at ${best.x},${best.y} (${best.size}px, ${best.letter_spacing}px spacing)`
+          : "menu templates: no anchors tested",
+      );
+    });
+  };
+
   const handleStart = () => {
     if (!activeSession) {
       setError("Create a session before enabling auto-detect.");
@@ -211,6 +244,11 @@ export function AutoDetectPanel() {
       appendLog("auto-detect stopped");
     });
   };
+
+  const bestMenuScore =
+    menuTemplateTest && menuTemplateTest.results.length > 0
+      ? Math.max(...menuTemplateTest.results.map((result) => result.score))
+      : 0;
 
   return (
     <div className="tracker-screen">
@@ -389,6 +427,115 @@ export function AutoDetectPanel() {
             className="max-h-64 w-full border border-border/70 bg-black object-contain"
             src={menuPreview.image}
           />
+        ) : null}
+      </section>
+
+      <section className="tracker-section-panel space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="tracker-heading text-lg">Menu template test (font)</h2>
+          <span className="border border-border/70 px-2 py-0.5 text-xs uppercase tracking-wide text-muted-foreground">
+            Diagnostic
+          </span>
+        </div>
+
+        <p className="text-sm text-muted-foreground">
+          Renders the left column buttons (CINÉMATIQUES, CRÉDITS, QUITTER DIABLO
+          II) from the bundled Exocet Blizzard font at several sizes and letter
+          spacings, then scores them inside the captured region. Use this on the
+          character selection screen. Values are percentages of the game window;
+          the default matches 2560x1440.
+        </p>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          {(["x", "y", "width", "height"] as const).map((key) => (
+            <div key={key} className="space-y-1.5">
+              <Label htmlFor={`menu-anchor-region-${key}`}>{key} (%)</Label>
+              <Input
+                className="h-10 text-sm"
+                id={`menu-anchor-region-${key}`}
+                max={100}
+                min={key === "width" || key === "height" ? 0.1 : 0}
+                step={0.1}
+                type="number"
+                value={menuAnchorRegion[key]}
+                onChange={(event) =>
+                  updateMenuAnchorRegion(key, Number(event.target.value))
+                }
+              />
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3">
+          <Button
+            className="tracker-action-secondary"
+            disabled={busy === "test-menu-templates"}
+            onClick={handleTestMenuTemplates}
+          >
+            {busy === "test-menu-templates"
+              ? "Testing..."
+              : "Test menu templates"}
+          </Button>
+          {menuTemplateTest ? (
+            <span className="text-sm text-muted-foreground">
+              Best score: {bestMenuScore.toFixed(3)}
+            </span>
+          ) : null}
+        </div>
+
+        <p className="text-xs text-muted-foreground">
+          This only tests font-generated templates; run detection is unchanged.
+        </p>
+
+        {menuTemplateTest ? (
+          <div className="space-y-3">
+            <div className="grid gap-2 sm:grid-cols-3">
+              {menuTemplateTest.results.map((result) => {
+                const isBest =
+                  result.score > 0 && result.score === bestMenuScore;
+                return (
+                  <div
+                    key={result.text}
+                    className={
+                      isBest
+                        ? "space-y-1 border border-emerald-500/70 bg-emerald-500/10 p-3"
+                        : "space-y-1 border border-border/50 p-3"
+                    }
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-sm font-medium">{result.text}</span>
+                      <span
+                        className={
+                          isBest
+                            ? "font-mono text-sm text-emerald-400"
+                            : "font-mono text-sm text-muted-foreground"
+                        }
+                      >
+                        {result.score.toFixed(3)}
+                      </span>
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {result.size > 0
+                        ? `${result.size}px, ${result.letter_spacing}px spacing`
+                        : "no candidate"}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      at {result.x},{result.y} region-relative ({result.width}x
+                      {result.height})
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {menuTemplateTest.preview ? (
+              <img
+                alt="Menu template test preview"
+                className="max-h-64 w-full border border-border/70 bg-black object-contain"
+                src={menuTemplateTest.preview}
+              />
+            ) : null}
+          </div>
         ) : null}
       </section>
 
