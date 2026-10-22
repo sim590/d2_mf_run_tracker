@@ -39,27 +39,27 @@ pub enum MenuAnchorGroup {
 impl MenuAnchorGroup {
     pub fn as_str(self) -> &'static str {
         match self {
-            MenuAnchorGroup::Left => "left",
+            MenuAnchorGroup::Left   => "left",
             MenuAnchorGroup::Center => "center",
-            MenuAnchorGroup::Right => "right",
+            MenuAnchorGroup::Right  => "right",
         }
     }
 
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "left" => Some(MenuAnchorGroup::Left),
+            "left"              => Some(MenuAnchorGroup::Left),
             "center" | "centre" => Some(MenuAnchorGroup::Center),
-            "right" => Some(MenuAnchorGroup::Right),
-            _ => None,
+            "right"             => Some(MenuAnchorGroup::Right),
+            _                   => None,
         }
     }
 
     pub fn for_anchor(text: &str) -> Option<Self> {
         match text {
             "CINÉMATIQUES" | "CRÉDITS" | "QUITTER DIABLO II" => Some(MenuAnchorGroup::Left),
-            "JOUER" => Some(MenuAnchorGroup::Center),
-            "CRÉER NOUVEAU" => Some(MenuAnchorGroup::Right),
-            _ => None,
+            "JOUER"                                          => Some(MenuAnchorGroup::Center),
+            "CRÉER NOUVEAU"                                  => Some(MenuAnchorGroup::Right),
+            _                                                => None,
         }
     }
 }
