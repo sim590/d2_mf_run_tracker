@@ -38,6 +38,43 @@ pub struct GameWindowInfo {
     pub height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+pub struct NormalizedRegion {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Default for NormalizedRegion {
+    fn default() -> Self {
+        Self {
+            x: 1175.0 / 2560.0,
+            y: 500.0 / 1440.0,
+            width: 200.0 / 2560.0,
+            height: 300.0 / 1440.0,
+        }
+    }
+}
+
+impl NormalizedRegion {
+    /// Convert fractions of the game window to a pixel region.
+    pub fn to_pixels(self, window: &GameWindowInfo) -> Region {
+        let window_width = window.width.max(1) as f32;
+        let window_height = window.height.max(1) as f32;
+        let x = (self.x.clamp(0.0, 1.0) * window_width).round() as i32;
+        let y = (self.y.clamp(0.0, 1.0) * window_height).round() as i32;
+        let width = (self.width.clamp(0.0, 1.0) * window_width).round() as u32;
+        let height = (self.height.clamp(0.0, 1.0) * window_height).round() as u32;
+        Region {
+            x,
+            y,
+            width: width.max(1),
+            height: height.max(1),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ImageData {
     pub width: u32,
@@ -134,5 +171,42 @@ mod tests {
         };
         let png = image.to_png_base64().expect("png encoding");
         assert!(png.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn normalized_region_scales_with_window() {
+        let region = NormalizedRegion::default();
+        let reference = GameWindowInfo {
+            id: 0,
+            title: String::new(),
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        assert_eq!(
+            region.to_pixels(&reference),
+            Region {
+                x: 1175,
+                y: 500,
+                width: 200,
+                height: 300,
+            }
+        );
+
+        let hd = GameWindowInfo {
+            width: 1920,
+            height: 1080,
+            ..reference
+        };
+        assert_eq!(
+            region.to_pixels(&hd),
+            Region {
+                x: 881,
+                y: 375,
+                width: 150,
+                height: 225,
+            }
+        );
     }
 }
