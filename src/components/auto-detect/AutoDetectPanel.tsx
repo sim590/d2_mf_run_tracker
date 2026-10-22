@@ -237,8 +237,10 @@ export function AutoDetectPanel() {
       <section className="tracker-section-panel space-y-3">
         <h2 className="tracker-heading text-lg">Loading region</h2>
         <p className="text-sm text-muted-foreground">
-          A small region that is bright in game and black during a loading
-          screen. Values are percentages of the game window; the defaults match
+          A small region that is bright in game. It is usually black when you
+          leave a game to the menu, but the enter-game loading animation can be
+          bright (the opening portal). The menu probe handles that transition.
+          Values are percentages of the game window; the defaults match
           2560x1440.
         </p>
 
@@ -302,9 +304,10 @@ export function AutoDetectPanel() {
 
         <p className="text-sm text-muted-foreground">
           Bright on the character-select screen (for example the Diablo II logo)
-          and dark in game. It ends the active run when you return to the menu;
-          loading screens inside the game do not end the run. Values are
-          percentages of the game window.
+          and dark in game. It ends the active run when you return to the menu,
+          and it starts a new run when you leave the menu. Loading screens
+          inside the game do not end the run. Values are percentages of the game
+          window.
         </p>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
