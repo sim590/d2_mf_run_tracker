@@ -820,7 +820,7 @@ export function AutoDetectPanel() {
         menu_dark_samples: templateMenuReady ? 2 : 4,
         hud_samples: 2,
         loading_samples: 1,
-        poll_interval_ms: 250,
+        poll_interval_ms: 125,
         min_run_seconds: 3,
       });
       setStatus(await getAutoDetectStatus());
