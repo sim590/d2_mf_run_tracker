@@ -782,17 +782,18 @@ export function AutoDetectPanel() {
       calibrationAnchors.some((anchor) => anchor.group === group);
     const templateMenuReady =
       hasGroup("left") && hasGroup("center") && hasGroup("right");
-    const menuTemplates = templateMenuReady
-      ? calibrationAnchors.map((anchor) => ({
-          region: percentToNormalized(anchor.region),
-          text: anchor.text,
-          group: anchor.group,
-          font: anchor.font,
-          size: anchor.size,
-          letter_spacing: anchor.letter_spacing,
-          threshold: 0.3,
-        }))
-      : [];
+    // Every saved anchor is sent, including CHARGEMENT. The menu rule still
+    // needs left+center+right, but the loading anchor alone can feed the
+    // loading guard in the HUD-only fallback.
+    const menuTemplates = calibrationAnchors.map((anchor) => ({
+      region: percentToNormalized(anchor.region),
+      text: anchor.text,
+      group: anchor.group,
+      font: anchor.font,
+      size: anchor.size,
+      letter_spacing: anchor.letter_spacing,
+      threshold: 0.3,
+    }));
 
     const savedHudTemplates = hudCalibration?.templates ?? [];
     const hudTemplates =
@@ -816,15 +817,16 @@ export function AutoDetectPanel() {
         bright_samples: 2,
         menu_threshold: 50,
         menu_samples: 2,
-        menu_dark_samples: menuTemplates.length > 0 ? 2 : 4,
+        menu_dark_samples: templateMenuReady ? 2 : 4,
         hud_samples: 2,
+        loading_samples: 1,
         poll_interval_ms: 250,
         min_run_seconds: 3,
       });
       setStatus(await getAutoDetectStatus());
       appendLog(
         hudTemplates.length > 0
-          ? `auto-detect started (${menuTemplates.length > 0 ? "combined menu + HUD" : "HUD only"})`
+          ? `auto-detect started (${templateMenuReady ? "combined menu + HUD" : "HUD only"})`
           : "auto-detect started (menu/brightness only)",
       );
     });
@@ -851,6 +853,8 @@ export function AutoDetectPanel() {
   const missingGroups = (["left", "center", "right"] as const).filter(
     (group) => !savedGroups.has(group),
   );
+  const loadingAnchorSaved =
+    savedAnchors.find((anchor) => anchor.group === "loading") ?? null;
   const templateMenuReady = missingGroups.length === 0;
 
   const singleResult =
@@ -872,11 +876,18 @@ export function AutoDetectPanel() {
   const hudVisibleCount = hudScores.filter((entry) => entry.visible).length;
   const hudFrameVisible = status?.last_hud_visible ?? false;
   const menuFrameVisible = menuAnchorsVisible(status?.last_menu_anchors ?? []);
-  const combinedSignal = hudFrameVisible
-    ? "in-game (HUD)"
-    : menuFrameVisible
-      ? "menu"
-      : "transition (phase kept)";
+  const loadingVisible = status?.last_loading_visible ?? false;
+  const liveLoadingAnchor =
+    (status?.last_menu_anchors ?? []).find(
+      (anchor) => anchor.group === "loading",
+    ) ?? null;
+  const combinedSignal = loadingVisible
+    ? "loading (phase kept)"
+    : hudFrameVisible
+      ? "in-game (HUD)"
+      : menuFrameVisible
+        ? "menu"
+        : "transition (phase kept)";
   const startMode = hudCombinedReady
     ? templateMenuReady
       ? "Combined menu + HUD"
@@ -1077,10 +1088,12 @@ export function AutoDetectPanel() {
           The menu template is the fast run-end trigger. Crop a single anchor
           text at a time (no neighbouring buttons). Each anchor has its own
           default region at 2560x1440 and its own saved region once calibrated.
-          “All anchors” tests the five anchors sequentially in their own
-          regions, not all in one crop. Live detection needs at least one
-          visible left, one center and one right anchor, and the HUD must not be
-          visible. Values are percentages of the game window.
+          “All anchors” tests the six anchors sequentially in their own regions,
+          not all in one crop. Live detection needs at least one visible left,
+          one center and one right anchor, and the HUD must not be visible. The
+          CHARGEMENT anchor is optional for the menu rule: it is the loading
+          guard, which keeps the phase and blocks menu false positives while a
+          level loads. Values are percentages of the game window.
         </p>
 
         <div className="space-y-1.5">
@@ -1141,7 +1154,7 @@ export function AutoDetectPanel() {
         <p className="text-xs text-muted-foreground">
           Testing alone does not change run detection. Saving anchors switches
           the menu boundary to the binary template; the brightness menu probe
-          stays as a fallback.
+          stays as a fallback. Saving CHARGEMENT enables the loading guard.
         </p>
 
         {menuTemplateTest ? (
@@ -1293,6 +1306,17 @@ export function AutoDetectPanel() {
                   </div>
                 );
               })}
+              <div className="text-xs text-muted-foreground">
+                <span className="font-mono uppercase">loading</span>:{" "}
+                {loadingAnchorSaved
+                  ? `${loadingAnchorSaved.text} binary ${loadingAnchorSaved.binary_score.toFixed(3)} (${loadingAnchorSaved.font} ${loadingAnchorSaved.size}px, ${loadingAnchorSaved.letter_spacing}px spacing) @ ${loadingAnchorSaved.region.x}/${loadingAnchorSaved.region.y}/${loadingAnchorSaved.region.width}x${loadingAnchorSaved.region.height}%`
+                  : "missing (optional for the menu rule)"}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {loadingAnchorSaved
+                  ? "The loading anchor feeds the loading guard: its one-frame signal keeps the phase and suppresses menu false-positives while a level loads."
+                  : "No loading guard; loading false-positives may end runs."}
+              </p>
               <p className="text-xs text-muted-foreground">
                 {templateMenuReady
                   ? "Template menu detection is active: at least one visible anchor in each group is required. Live threshold: binary 0.300 over two frames."
@@ -1526,6 +1550,14 @@ export function AutoDetectPanel() {
           <div>Running: {status?.running ? "yes" : "no"}</div>
           <div>Phase: {status?.phase ?? "unknown"}</div>
           <div>Combined signal: {combinedSignal}</div>
+          <div>
+            Loading:{" "}
+            {loadingAnchorSaved === null
+              ? "not calibrated"
+              : loadingVisible
+                ? `visible -> transition${liveLoadingAnchor ? ` (binary ${liveLoadingAnchor.score.toFixed(3)})` : ""}`
+                : "none"}
+          </div>
           <div>Last event: {status?.last_event ?? "none"}</div>
           <div>
             Menu template score: {status?.last_menu_score?.toFixed(3) ?? "none"}

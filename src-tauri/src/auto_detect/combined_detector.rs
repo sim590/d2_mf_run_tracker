@@ -3,9 +3,12 @@
 //! The menu template is the fast run-end trigger: returning to the character
 //! select screen ends the run within a couple of frames. The HUD confirms that
 //! the game is actually in progress, which prevents the menu template from
-//! ending a run on an inventory tooltip false positive. When neither signal is
-//! visible (zone teleport, loading screen, submenu) the phase is kept as is and
-//! nothing is emitted, so no disappearance grace is needed.
+//! ending a run on an inventory tooltip false positive. The CHARGEMENT loading
+//! anchor takes priority over both: while it is confirmed the phase is kept and
+//! nothing is emitted, so a menu false-positive on a loading screen cannot end
+//! a run. When neither signal is visible (zone teleport, loading screen,
+//! submenu) the phase is kept as is and nothing is emitted, so no disappearance
+//! grace is needed.
 
 use std::time::{Duration, Instant};
 
@@ -17,6 +20,9 @@ pub struct CombinedDetectorConfig {
     pub menu_samples: u32,
     /// Consecutive frames the HUD must be visible before it counts.
     pub hud_samples: u32,
+    /// Consecutive frames the loading anchor must be visible before the guard
+    /// engages. The loading screen can be brief, so the default is one frame.
+    pub loading_samples: u32,
     pub min_run_duration: Duration,
     /// HUD-only fallback: when no menu calibration exists, a confirmed missing
     /// HUD ends the run instead of being treated as a transition.
@@ -28,6 +34,7 @@ impl Default for CombinedDetectorConfig {
         Self {
             menu_samples: 2,
             hud_samples: 2,
+            loading_samples: 1,
             min_run_duration: Duration::from_secs(3),
             hud_missing_ends_run: false,
         }
@@ -40,6 +47,7 @@ pub struct CombinedDetector {
     menu_streak: u32,
     hud_streak: u32,
     hud_missing_streak: u32,
+    loading_streak: u32,
     run_started_at: Option<Instant>,
 }
 
@@ -51,6 +59,7 @@ impl CombinedDetector {
             menu_streak: 0,
             hud_streak: 0,
             hud_missing_streak: 0,
+            loading_streak: 0,
             run_started_at: None,
         }
     }
@@ -63,14 +72,35 @@ impl CombinedDetector {
     ///
     /// `menu_visible` is the multi-anchor menu rule (one visible anchor in each
     /// group) and `hud_visible` is the 2-of-3 HUD rule. Both are confirmed over
-    /// their own sample count before they are acted on.
+    /// their own sample count before they are acted on. `loading_visible` is
+    /// the CHARGEMENT anchor; when confirmed it wins over every other signal
+    /// and only keeps the current phase.
     pub fn process(
         &mut self,
         menu_visible: bool,
         hud_visible: bool,
+        loading_visible: bool,
         now: Instant,
     ) -> Vec<DetectorEvent> {
         let mut events = Vec::new();
+
+        if loading_visible {
+            self.loading_streak = self.loading_streak.saturating_add(1);
+        } else {
+            self.loading_streak = 0;
+        }
+        let loading_confirmed = self.loading_streak >= self.config.loading_samples.max(1);
+
+        if loading_confirmed {
+            // A loading screen can false-positive the menu template and it
+            // hides the HUD. Keep the current phase, emit nothing and clear
+            // the other streaks so the loading frames cannot end the run or
+            // start a new one.
+            self.menu_streak = 0;
+            self.hud_streak = 0;
+            self.hud_missing_streak = 0;
+            return events;
+        }
 
         if hud_visible {
             self.hud_streak = self.hud_streak.saturating_add(1);
@@ -142,6 +172,7 @@ mod tests {
         CombinedDetector::new(CombinedDetectorConfig {
             menu_samples: 2,
             hud_samples: 2,
+            loading_samples: 1,
             min_run_duration: Duration::from_secs(3),
             hud_missing_ends_run: false,
         })
@@ -157,15 +188,19 @@ mod tests {
         let base = Instant::now();
 
         // Character select: menu visible, no HUD.
-        assert!(detector.process(true, false, at(base, 0)).is_empty());
+        assert!(detector.process(true, false, false, at(base, 0)).is_empty());
         assert_eq!(detector.phase(), Phase::Unknown);
-        assert!(detector.process(true, false, at(base, 250)).is_empty());
+        assert!(detector
+            .process(true, false, false, at(base, 250))
+            .is_empty());
         assert_eq!(detector.phase(), Phase::Menu);
 
         // Entering the game: HUD appears, menu gone.
-        assert!(detector.process(false, true, at(base, 500)).is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 500))
+            .is_empty());
         assert_eq!(
-            detector.process(false, true, at(base, 750)),
+            detector.process(false, true, false, at(base, 750)),
             vec![DetectorEvent::RunStart]
         );
         assert_eq!(detector.phase(), Phase::InGame);
@@ -175,18 +210,20 @@ mod tests {
     fn game_then_menu_ends_a_run() {
         let mut detector = detector();
         let base = Instant::now();
-        detector.process(true, false, at(base, 0));
-        detector.process(true, false, at(base, 250));
-        detector.process(false, true, at(base, 500));
+        detector.process(true, false, false, at(base, 0));
+        detector.process(true, false, false, at(base, 250));
+        detector.process(false, true, false, at(base, 500));
         assert_eq!(
-            detector.process(false, true, at(base, 750)),
+            detector.process(false, true, false, at(base, 750)),
             vec![DetectorEvent::RunStart]
         );
 
         // Return to the character select: menu visible, no HUD.
-        assert!(detector.process(true, false, at(base, 4000)).is_empty());
+        assert!(detector
+            .process(true, false, false, at(base, 4000))
+            .is_empty());
         assert_eq!(
-            detector.process(true, false, at(base, 4250)),
+            detector.process(true, false, false, at(base, 4250)),
             vec![DetectorEvent::RunEnd {
                 duration: Duration::from_millis(3500),
                 too_short: false,
@@ -199,24 +236,30 @@ mod tests {
     fn teleport_with_neither_signal_keeps_in_game() {
         let mut detector = detector();
         let base = Instant::now();
-        detector.process(true, false, at(base, 0));
-        detector.process(true, false, at(base, 250));
-        detector.process(false, true, at(base, 500));
+        detector.process(true, false, false, at(base, 0));
+        detector.process(true, false, false, at(base, 250));
+        detector.process(false, true, false, at(base, 500));
         assert_eq!(
-            detector.process(false, true, at(base, 750)),
+            detector.process(false, true, false, at(base, 750)),
             vec![DetectorEvent::RunStart]
         );
 
         // Zone teleport: neither the menu nor the HUD is visible for a while.
         for step in 0..8u64 {
             let offset = 1000 + step * 250;
-            assert!(detector.process(false, false, at(base, offset)).is_empty());
+            assert!(detector
+                .process(false, false, false, at(base, offset))
+                .is_empty());
         }
         assert_eq!(detector.phase(), Phase::InGame);
 
         // The HUD comes back: still in the same run, no new start.
-        assert!(detector.process(false, true, at(base, 3000)).is_empty());
-        assert!(detector.process(false, true, at(base, 3250)).is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 3000))
+            .is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 3250))
+            .is_empty());
         assert_eq!(detector.phase(), Phase::InGame);
     }
 
@@ -224,18 +267,24 @@ mod tests {
     fn brief_hud_missing_without_menu_keeps_in_game() {
         let mut detector = detector();
         let base = Instant::now();
-        detector.process(true, false, at(base, 0));
-        detector.process(true, false, at(base, 250));
-        detector.process(false, true, at(base, 500));
+        detector.process(true, false, false, at(base, 0));
+        detector.process(true, false, false, at(base, 250));
+        detector.process(false, true, false, at(base, 500));
         assert_eq!(
-            detector.process(false, true, at(base, 750)),
+            detector.process(false, true, false, at(base, 750)),
             vec![DetectorEvent::RunStart]
         );
 
         // A couple of HUD-less frames with no menu must not end the run.
-        assert!(detector.process(false, false, at(base, 1000)).is_empty());
-        assert!(detector.process(false, false, at(base, 1250)).is_empty());
-        assert!(detector.process(false, false, at(base, 1500)).is_empty());
+        assert!(detector
+            .process(false, false, false, at(base, 1000))
+            .is_empty());
+        assert!(detector
+            .process(false, false, false, at(base, 1250))
+            .is_empty());
+        assert!(detector
+            .process(false, false, false, at(base, 1500))
+            .is_empty());
         assert_eq!(detector.phase(), Phase::InGame);
     }
 
@@ -243,11 +292,11 @@ mod tests {
     fn menu_false_positive_with_hud_visible_keeps_in_game() {
         let mut detector = detector();
         let base = Instant::now();
-        detector.process(true, false, at(base, 0));
-        detector.process(true, false, at(base, 250));
-        detector.process(false, true, at(base, 500));
+        detector.process(true, false, false, at(base, 0));
+        detector.process(true, false, false, at(base, 250));
+        detector.process(false, true, false, at(base, 500));
         assert_eq!(
-            detector.process(false, true, at(base, 750)),
+            detector.process(false, true, false, at(base, 750)),
             vec![DetectorEvent::RunStart]
         );
 
@@ -255,7 +304,9 @@ mod tests {
         // stays visible.
         for step in 0..6u64 {
             let offset = 1000 + step * 250;
-            assert!(detector.process(true, true, at(base, offset)).is_empty());
+            assert!(detector
+                .process(true, true, false, at(base, offset))
+                .is_empty());
         }
         assert_eq!(detector.phase(), Phase::InGame);
     }
@@ -264,35 +315,41 @@ mod tests {
     fn manual_stop_does_not_repeat_start_while_hud_stays_visible() {
         let mut detector = detector();
         let base = Instant::now();
-        detector.process(true, false, at(base, 0));
-        detector.process(true, false, at(base, 250));
-        detector.process(false, true, at(base, 500));
+        detector.process(true, false, false, at(base, 0));
+        detector.process(true, false, false, at(base, 250));
+        detector.process(false, true, false, at(base, 500));
         assert_eq!(
-            detector.process(false, true, at(base, 750)),
+            detector.process(false, true, false, at(base, 750)),
             vec![DetectorEvent::RunStart]
         );
 
         // HUD stays visible for a long time: no repeated start, no end.
         for step in 0..20u64 {
             let offset = 1000 + step * 250;
-            assert!(detector.process(false, true, at(base, offset)).is_empty());
+            assert!(detector
+                .process(false, true, false, at(base, offset))
+                .is_empty());
         }
         assert_eq!(detector.phase(), Phase::InGame);
 
         // The next return to the menu ends the run once, then the next entry
         // starts exactly one new run.
-        assert!(detector.process(true, false, at(base, 6000)).is_empty());
+        assert!(detector
+            .process(true, false, false, at(base, 6000))
+            .is_empty());
         assert_eq!(
-            detector.process(true, false, at(base, 6250)),
+            detector.process(true, false, false, at(base, 6250)),
             vec![DetectorEvent::RunEnd {
                 duration: Duration::from_millis(5500),
                 too_short: false,
             }]
         );
 
-        assert!(detector.process(false, true, at(base, 6500)).is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 6500))
+            .is_empty());
         assert_eq!(
-            detector.process(false, true, at(base, 6750)),
+            detector.process(false, true, false, at(base, 6750)),
             vec![DetectorEvent::RunStart]
         );
     }
@@ -301,17 +358,19 @@ mod tests {
     fn short_run_is_flagged() {
         let mut detector = detector();
         let base = Instant::now();
-        detector.process(true, false, at(base, 0));
-        detector.process(true, false, at(base, 250));
-        detector.process(false, true, at(base, 500));
+        detector.process(true, false, false, at(base, 0));
+        detector.process(true, false, false, at(base, 250));
+        detector.process(false, true, false, at(base, 500));
         assert_eq!(
-            detector.process(false, true, at(base, 750)),
+            detector.process(false, true, false, at(base, 750)),
             vec![DetectorEvent::RunStart]
         );
 
-        assert!(detector.process(true, false, at(base, 1000)).is_empty());
+        assert!(detector
+            .process(true, false, false, at(base, 1000))
+            .is_empty());
         assert_eq!(
-            detector.process(true, false, at(base, 1250)),
+            detector.process(true, false, false, at(base, 1250)),
             vec![DetectorEvent::RunEnd {
                 duration: Duration::from_millis(500),
                 too_short: true,
@@ -325,19 +384,27 @@ mod tests {
         let base = Instant::now();
 
         // Detection starts while already in game: no run is started.
-        assert!(detector.process(false, true, at(base, 0)).is_empty());
-        assert!(detector.process(false, true, at(base, 250)).is_empty());
+        assert!(detector.process(false, true, false, at(base, 0)).is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 250))
+            .is_empty());
         assert_eq!(detector.phase(), Phase::InGame);
 
         // Leaving to the menu does not end a run that was never started.
-        assert!(detector.process(true, false, at(base, 500)).is_empty());
-        assert!(detector.process(true, false, at(base, 750)).is_empty());
+        assert!(detector
+            .process(true, false, false, at(base, 500))
+            .is_empty());
+        assert!(detector
+            .process(true, false, false, at(base, 750))
+            .is_empty());
         assert_eq!(detector.phase(), Phase::Menu);
 
         // The next game entry starts a run.
-        assert!(detector.process(false, true, at(base, 1000)).is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 1000))
+            .is_empty());
         assert_eq!(
-            detector.process(false, true, at(base, 1250)),
+            detector.process(false, true, false, at(base, 1250)),
             vec![DetectorEvent::RunStart]
         );
     }
@@ -347,30 +414,221 @@ mod tests {
         let mut detector = CombinedDetector::new(CombinedDetectorConfig {
             menu_samples: 2,
             hud_samples: 2,
+            loading_samples: 1,
             min_run_duration: Duration::from_secs(3),
             hud_missing_ends_run: true,
         });
         let base = Instant::now();
 
-        assert!(detector.process(false, true, at(base, 0)).is_empty());
-        assert!(detector.process(false, true, at(base, 250)).is_empty());
+        assert!(detector.process(false, true, false, at(base, 0)).is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 250))
+            .is_empty());
         assert_eq!(detector.phase(), Phase::InGame);
 
         // No run was started (Unknown -> InGame), so no end is emitted.
-        assert!(detector.process(false, false, at(base, 500)).is_empty());
-        assert!(detector.process(false, false, at(base, 750)).is_empty());
+        assert!(detector
+            .process(false, false, false, at(base, 500))
+            .is_empty());
+        assert!(detector
+            .process(false, false, false, at(base, 750))
+            .is_empty());
         assert_eq!(detector.phase(), Phase::Menu);
 
-        assert!(detector.process(false, true, at(base, 1000)).is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 1000))
+            .is_empty());
         assert_eq!(
-            detector.process(false, true, at(base, 1250)),
+            detector.process(false, true, false, at(base, 1250)),
             vec![DetectorEvent::RunStart]
         );
 
         // The HUD disappears: the run ends (HUD-only fallback).
-        assert!(detector.process(false, false, at(base, 4000)).is_empty());
+        assert!(detector
+            .process(false, false, false, at(base, 4000))
+            .is_empty());
         assert_eq!(
-            detector.process(false, false, at(base, 4250)),
+            detector.process(false, false, false, at(base, 4250)),
+            vec![DetectorEvent::RunEnd {
+                duration: Duration::from_millis(3000),
+                too_short: false,
+            }]
+        );
+    }
+
+    /// Bring the detector to InGame with a run in progress.
+    fn start_run(detector: &mut CombinedDetector, base: Instant) {
+        detector.process(true, false, false, at(base, 0));
+        detector.process(true, false, false, at(base, 250));
+        detector.process(false, true, false, at(base, 500));
+        assert_eq!(
+            detector.process(false, true, false, at(base, 750)),
+            vec![DetectorEvent::RunStart]
+        );
+    }
+
+    #[test]
+    fn loading_during_game_keeps_the_run() {
+        let mut detector = detector();
+        let base = Instant::now();
+        start_run(&mut detector, base);
+
+        // Loading screen: neither the menu nor the HUD is visible, but the
+        // CHARGEMENT anchor is.
+        for step in 0..4u64 {
+            let offset = 1000 + step * 250;
+            assert!(detector
+                .process(false, false, true, at(base, offset))
+                .is_empty());
+        }
+        assert_eq!(detector.phase(), Phase::InGame);
+
+        // The HUD returns: still the same run, no new start.
+        assert!(detector
+            .process(false, true, false, at(base, 2250))
+            .is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 2500))
+            .is_empty());
+        assert_eq!(detector.phase(), Phase::InGame);
+    }
+
+    #[test]
+    fn loading_before_menu_ends_after_menu_appears() {
+        let mut detector = detector();
+        let base = Instant::now();
+        start_run(&mut detector, base);
+
+        // Loading before the menu: the phase stays InGame.
+        for step in 0..4u64 {
+            let offset = 1000 + step * 250;
+            assert!(detector
+                .process(false, false, true, at(base, offset))
+                .is_empty());
+        }
+        assert_eq!(detector.phase(), Phase::InGame);
+
+        // The menu anchors are confirmed after the loading: the run ends
+        // quickly, over the usual two frames.
+        assert!(detector
+            .process(true, false, false, at(base, 4000))
+            .is_empty());
+        assert_eq!(
+            detector.process(true, false, false, at(base, 4250)),
+            vec![DetectorEvent::RunEnd {
+                duration: Duration::from_millis(3500),
+                too_short: false,
+            }]
+        );
+        assert_eq!(detector.phase(), Phase::Menu);
+    }
+
+    #[test]
+    fn loading_between_menu_and_game_starts_when_hud_appears() {
+        let mut detector = detector();
+        let base = Instant::now();
+
+        // Character select.
+        detector.process(true, false, false, at(base, 0));
+        assert!(detector
+            .process(true, false, false, at(base, 250))
+            .is_empty());
+        assert_eq!(detector.phase(), Phase::Menu);
+
+        // Loading while entering the game: the phase stays Menu.
+        for step in 0..4u64 {
+            let offset = 500 + step * 250;
+            assert!(detector
+                .process(false, false, true, at(base, offset))
+                .is_empty());
+        }
+        assert_eq!(detector.phase(), Phase::Menu);
+
+        // The HUD appears: one run starts.
+        assert!(detector
+            .process(false, true, false, at(base, 1750))
+            .is_empty());
+        assert_eq!(
+            detector.process(false, true, false, at(base, 2000)),
+            vec![DetectorEvent::RunStart]
+        );
+        assert_eq!(detector.phase(), Phase::InGame);
+    }
+
+    #[test]
+    fn menu_false_positive_during_loading_is_suppressed() {
+        let mut detector = detector();
+        let base = Instant::now();
+        start_run(&mut detector, base);
+
+        // The loading screen false-positives the menu for long enough to
+        // confirm it, but the guard wins.
+        for step in 0..6u64 {
+            let offset = 1000 + step * 250;
+            assert!(detector
+                .process(true, false, true, at(base, offset))
+                .is_empty());
+        }
+        assert_eq!(detector.phase(), Phase::InGame);
+
+        // The HUD returns: still the same run, no new start.
+        assert!(detector
+            .process(false, true, false, at(base, 2500))
+            .is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 2750))
+            .is_empty());
+        assert_eq!(detector.phase(), Phase::InGame);
+    }
+
+    #[test]
+    fn loading_during_hud_only_fallback_keeps_the_run() {
+        let mut detector = CombinedDetector::new(CombinedDetectorConfig {
+            menu_samples: 2,
+            hud_samples: 2,
+            loading_samples: 1,
+            min_run_duration: Duration::from_secs(3),
+            hud_missing_ends_run: true,
+        });
+        let base = Instant::now();
+
+        // Unknown -> InGame, a confirmed HUD miss -> Menu, then HUD -> start.
+        detector.process(false, true, false, at(base, 0));
+        detector.process(false, true, false, at(base, 250));
+        detector.process(false, false, false, at(base, 500));
+        detector.process(false, false, false, at(base, 750));
+        assert_eq!(detector.phase(), Phase::Menu);
+        detector.process(false, true, false, at(base, 1000));
+        assert_eq!(
+            detector.process(false, true, false, at(base, 1250)),
+            vec![DetectorEvent::RunStart]
+        );
+
+        // Loading screen: the HUD is missing, but CHARGEMENT keeps the run.
+        for step in 0..4u64 {
+            let offset = 1500 + step * 250;
+            assert!(detector
+                .process(false, false, true, at(base, offset))
+                .is_empty());
+        }
+        assert_eq!(detector.phase(), Phase::InGame);
+
+        // The HUD returns: same run, no new start.
+        assert!(detector
+            .process(false, true, false, at(base, 2750))
+            .is_empty());
+        assert!(detector
+            .process(false, true, false, at(base, 3000))
+            .is_empty());
+        assert_eq!(detector.phase(), Phase::InGame);
+
+        // Without the loading anchor, a confirmed missing HUD still ends the
+        // run.
+        assert!(detector
+            .process(false, false, false, at(base, 4000))
+            .is_empty());
+        assert_eq!(
+            detector.process(false, false, false, at(base, 4250)),
             vec![DetectorEvent::RunEnd {
                 duration: Duration::from_millis(3000),
                 too_short: false,

@@ -298,6 +298,8 @@ struct ActiveMenuTemplate {
 
 struct MenuFrame {
     visible: bool,
+    /// The CHARGEMENT anchor is visible: the combined detector's loading guard.
+    loading_visible: bool,
     max_score: f32,
     anchors: Vec<LiveMenuAnchor>,
     error: Option<String>,
@@ -314,6 +316,7 @@ fn capture_menu_frame(
     let mut left_visible = false;
     let mut center_visible = false;
     let mut right_visible = false;
+    let mut loading_visible = false;
     let mut captured_any = false;
     let mut max_score = 0.0_f32;
 
@@ -329,6 +332,7 @@ fn capture_menu_frame(
                     MenuAnchorGroup::Left => left_visible |= visible,
                     MenuAnchorGroup::Center => center_visible |= visible,
                     MenuAnchorGroup::Right => right_visible |= visible,
+                    MenuAnchorGroup::Loading => loading_visible |= visible,
                 }
                 anchors.push(LiveMenuAnchor {
                     text: template.config.text.clone(),
@@ -348,6 +352,7 @@ fn capture_menu_frame(
     if !captured_any {
         return MenuFrame {
             visible: false,
+            loading_visible: false,
             max_score: 0.0,
             anchors,
             error: Some(format!(
@@ -359,6 +364,7 @@ fn capture_menu_frame(
 
     MenuFrame {
         visible: menu_groups_visible(left_visible, center_visible, right_visible),
+        loading_visible,
         max_score,
         anchors,
         error: if capture_errors.is_empty() {
@@ -483,7 +489,20 @@ fn run_auto_detect(
         }
     }
 
-    let menu_ready = !menu_templates.is_empty();
+    let has_menu_templates = !menu_templates.is_empty();
+    // The menu rule needs one anchor in each of left, center and right. The
+    // loading anchor is optional for the rule but feeds the loading guard.
+    let menu_ready = [
+        MenuAnchorGroup::Left,
+        MenuAnchorGroup::Center,
+        MenuAnchorGroup::Right,
+    ]
+    .iter()
+    .all(|group| {
+        menu_templates
+            .iter()
+            .any(|template| template.group == *group)
+    });
     let hud_ready = !hud_templates.is_empty();
     // The combined detector runs whenever HUD templates are configured; it uses
     // the menu signal when the menu is calibrated, and the HUD alone otherwise.
@@ -492,6 +511,12 @@ fn run_auto_detect(
     combined_config.hud_missing_ends_run = !menu_ready;
     let mut combined_detector = CombinedDetector::new(combined_config);
     let event_source = if use_combined { "combined" } else { "screen" };
+    // In the HUD-only fallback, capturing the menu frame still provides the
+    // loading anchor when it is calibrated.
+    let capture_menu = menu_ready || (use_combined && has_menu_templates);
+    let has_loading_anchor = menu_templates
+        .iter()
+        .any(|template| template.group == MenuAnchorGroup::Loading);
 
     while !stop.load(Ordering::Relaxed) {
         if last_window_refresh.elapsed() >= Duration::from_secs(5) {
@@ -505,7 +530,7 @@ fn run_auto_detect(
             Ok(image) => {
                 error_count = 0;
                 let brightness = image.mean_brightness();
-                let menu_frame = if menu_ready {
+                let menu_frame = if capture_menu {
                     Some(capture_menu_frame(&backend, &window, &menu_templates))
                 } else {
                     None
@@ -526,8 +551,15 @@ fn run_auto_detect(
                 if use_combined {
                     let menu_visible = menu_frame.as_ref().is_some_and(|frame| frame.visible);
                     let hud_is_visible = hud_frame.as_ref().is_some_and(|frame| frame.visible);
-                    events =
-                        combined_detector.process(menu_visible, hud_is_visible, Instant::now());
+                    let loading_visible = menu_frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.loading_visible);
+                    events = combined_detector.process(
+                        menu_visible,
+                        hud_is_visible,
+                        loading_visible,
+                        Instant::now(),
+                    );
                     phase = combined_detector.phase().as_str().to_string();
                     if let Some(frame) = &menu_frame {
                         last_menu_score = Some(frame.max_score);
@@ -563,6 +595,11 @@ fn run_auto_detect(
 
                 let hud_error = hud_frame.as_ref().and_then(|frame| frame.error.clone());
                 let last_hud_visible = hud_frame.as_ref().map(|frame| frame.visible);
+                let last_loading_visible = if has_loading_anchor {
+                    menu_frame.as_ref().map(|frame| frame.loading_visible)
+                } else {
+                    None
+                };
                 let last_hud_scores = hud_frame.map(|frame| frame.results).unwrap_or_default();
                 let mut menu_error = probe_error.or_else(|| template_config_error.clone());
                 if let Some(error) = hud_error {
@@ -581,6 +618,7 @@ fn run_auto_detect(
                     current.last_menu_anchors = last_menu_anchors;
                     current.last_hud_visible = last_hud_visible;
                     current.last_hud_scores = last_hud_scores;
+                    current.last_loading_visible = last_loading_visible;
                     current.phase = phase;
                     current.last_error = menu_error;
                 });

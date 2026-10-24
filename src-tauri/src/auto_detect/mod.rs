@@ -63,6 +63,7 @@ pub struct AutoDetectConfig {
     pub menu_samples: u32,
     pub menu_dark_samples: u32,
     pub hud_samples: u32,
+    pub loading_samples: u32,
     pub poll_interval_ms: u64,
     pub min_run_seconds: f64,
 }
@@ -81,6 +82,7 @@ impl Default for AutoDetectConfig {
             menu_samples: 2,
             menu_dark_samples: 4,
             hud_samples: 2,
+            loading_samples: 1,
             poll_interval_ms: 250,
             min_run_seconds: 3.0,
         }
@@ -104,6 +106,7 @@ impl AutoDetectConfig {
         CombinedDetectorConfig {
             menu_samples: self.menu_samples.max(1),
             hud_samples: self.hud_samples.max(1),
+            loading_samples: self.loading_samples.max(1),
             min_run_duration: Duration::from_secs_f64(self.min_run_seconds.max(0.0)),
             hud_missing_ends_run: false,
         }
@@ -143,6 +146,7 @@ pub struct AutoDetectStatus {
     pub last_menu_anchors: Vec<LiveMenuAnchor>,
     pub last_hud_visible: Option<bool>,
     pub last_hud_scores: Vec<HudTemplateResult>,
+    pub last_loading_visible: Option<bool>,
     pub phase: String,
     pub last_error: Option<String>,
     pub last_event: Option<String>,
@@ -159,6 +163,7 @@ impl Default for AutoDetectStatus {
             last_menu_anchors: Vec::new(),
             last_hud_visible: None,
             last_hud_scores: Vec::new(),
+            last_loading_visible: None,
             phase: Phase::Unknown.as_str().to_string(),
             last_error: None,
             last_event: None,

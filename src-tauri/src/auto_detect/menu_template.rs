@@ -23,22 +23,27 @@ static HEAVY_BYTES: &[u8] = include_bytes!("../../../src/assets/exocet-blizzard-
 
 /// Menu buttons used for detection. The left column strings are unique to the
 /// character selection screen (unlike OPTIONS, which the pause menu shows).
-pub const MENU_ANCHORS: [&str; 5] = [
+/// CHARGEMENT is the loading-screen anchor: it is not part of the menu rule,
+/// but it guards against menu false positives while a level loads.
+pub const MENU_ANCHORS: [&str; 6] = [
     "CINÉMATIQUES",
     "CRÉDITS",
     "QUITTER DIABLO II",
     "JOUER",
     "CRÉER NOUVEAU",
+    "CHARGEMENT",
 ];
 
 /// The three screen regions that must all show a menu anchor before the menu
 /// is considered visible. A tooltip can overlap one region by chance, but not
-/// all three at once.
+/// all three at once. The loading group is separate: it is not part of the
+/// menu rule, but it feeds the combined detector's loading guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuAnchorGroup {
     Left,
     Center,
     Right,
+    Loading,
 }
 
 impl MenuAnchorGroup {
@@ -47,6 +52,7 @@ impl MenuAnchorGroup {
             MenuAnchorGroup::Left => "left",
             MenuAnchorGroup::Center => "center",
             MenuAnchorGroup::Right => "right",
+            MenuAnchorGroup::Loading => "loading",
         }
     }
 
@@ -55,6 +61,7 @@ impl MenuAnchorGroup {
             "left" => Some(MenuAnchorGroup::Left),
             "center" | "centre" => Some(MenuAnchorGroup::Center),
             "right" => Some(MenuAnchorGroup::Right),
+            "loading" => Some(MenuAnchorGroup::Loading),
             _ => None,
         }
     }
@@ -64,12 +71,14 @@ impl MenuAnchorGroup {
             "CINÉMATIQUES" | "CRÉDITS" | "QUITTER DIABLO II" => Some(MenuAnchorGroup::Left),
             "JOUER" => Some(MenuAnchorGroup::Center),
             "CRÉER NOUVEAU" => Some(MenuAnchorGroup::Right),
+            "CHARGEMENT" => Some(MenuAnchorGroup::Loading),
             _ => None,
         }
     }
 }
 
-/// All three groups must have at least one visible anchor.
+/// All three groups must have at least one visible anchor. The loading group
+/// is deliberately excluded from this rule.
 pub fn menu_groups_visible(left: bool, center: bool, right: bool) -> bool {
     left && center && right
 }
@@ -598,6 +607,10 @@ mod tests {
             MenuAnchorGroup::for_anchor("CRÉER NOUVEAU"),
             Some(MenuAnchorGroup::Right)
         );
+        assert_eq!(
+            MenuAnchorGroup::for_anchor("CHARGEMENT"),
+            Some(MenuAnchorGroup::Loading)
+        );
         assert_eq!(MenuAnchorGroup::for_anchor("OPTIONS"), None);
 
         assert_eq!(MenuAnchorGroup::parse("LEFT"), Some(MenuAnchorGroup::Left));
@@ -608,6 +621,10 @@ mod tests {
         assert_eq!(
             MenuAnchorGroup::parse("right"),
             Some(MenuAnchorGroup::Right)
+        );
+        assert_eq!(
+            MenuAnchorGroup::parse("loading"),
+            Some(MenuAnchorGroup::Loading)
         );
         assert_eq!(MenuAnchorGroup::parse("somewhere"), None);
     }
@@ -702,6 +719,10 @@ mod tests {
         let right = test_menu_templates(&search, Some("CRÉER NOUVEAU"));
         assert_eq!(right.len(), 1);
         assert_eq!(right[0].group, "right");
+
+        let loading = test_menu_templates(&search, Some("CHARGEMENT"));
+        assert_eq!(loading.len(), 1);
+        assert_eq!(loading[0].group, "loading");
 
         let all = test_menu_templates(&search, None);
         assert_eq!(all.len(), MENU_ANCHORS.len());

@@ -78,6 +78,7 @@ export type AutoDetectConfig = {
   menu_samples: number;
   menu_dark_samples: number;
   hud_samples: number;
+  loading_samples: number;
   poll_interval_ms: number;
   min_run_seconds: number;
 };
@@ -98,6 +99,7 @@ export type AutoDetectStatus = {
   last_menu_anchors: LiveMenuAnchor[];
   last_hud_visible: boolean | null;
   last_hud_scores: HudTemplateResult[];
+  last_loading_visible: boolean | null;
   phase: string;
   last_error: string | null;
   last_event: string | null;
@@ -149,7 +151,7 @@ export const DEFAULT_MENU_REGION_PERCENT: RegionPercent = {
   height: 6.94,
 };
 
-export type MenuAnchorGroup = "left" | "center" | "right";
+export type MenuAnchorGroup = "left" | "center" | "right" | "loading";
 
 export const MENU_ANCHOR_OPTIONS = [
   "CINÉMATIQUES",
@@ -157,6 +159,7 @@ export const MENU_ANCHOR_OPTIONS = [
   "QUITTER DIABLO II",
   "JOUER",
   "CRÉER NOUVEAU",
+  "CHARGEMENT",
 ] as const;
 
 export type MenuAnchorText = (typeof MENU_ANCHOR_OPTIONS)[number];
@@ -167,6 +170,7 @@ export const MENU_ANCHOR_GROUPS: Record<MenuAnchorText, MenuAnchorGroup> = {
   "QUITTER DIABLO II": "left",
   JOUER: "center",
   "CRÉER NOUVEAU": "right",
+  CHARGEMENT: "loading",
 };
 
 // Starting points for 2560x1440. A text-only crop per anchor; adjust after
@@ -180,6 +184,7 @@ export const DEFAULT_MENU_ANCHOR_REGIONS: Record<
   "QUITTER DIABLO II": { x: 3, y: 56.5, width: 15, height: 4 },
   JOUER: { x: 43, y: 82, width: 14, height: 4 },
   "CRÉER NOUVEAU": { x: 84, y: 81, width: 14, height: 4 },
+  CHARGEMENT: { x: 42, y: 71, width: 16, height: 4 },
 };
 
 export const DEFAULT_MENU_ANCHOR: MenuAnchorText = MENU_ANCHOR_OPTIONS[0];
