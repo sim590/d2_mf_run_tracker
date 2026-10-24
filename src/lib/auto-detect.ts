@@ -184,7 +184,7 @@ export const DEFAULT_MENU_ANCHOR_REGIONS: Record<
   "QUITTER DIABLO II": { x: 3, y: 56.5, width: 15, height: 4 },
   JOUER: { x: 43, y: 82, width: 14, height: 4 },
   "CRÉER NOUVEAU": { x: 84, y: 81, width: 14, height: 4 },
-  CHARGEMENT: { x: 42, y: 71, width: 16, height: 4 },
+  CHARGEMENT: { x: 44, y: 69, width: 13, height: 5 },
 };
 
 export const DEFAULT_MENU_ANCHOR: MenuAnchorText = MENU_ANCHOR_OPTIONS[0];
