@@ -179,9 +179,9 @@ export const DEFAULT_MENU_ANCHOR_REGIONS: Record<
   MenuAnchorText,
   RegionPercent
 > = {
-  CINÉMATIQUES: { x: 3, y: 45.5, width: 15, height: 4 },
-  CRÉDITS: { x: 3, y: 51, width: 15, height: 4 },
-  "QUITTER DIABLO II": { x: 3, y: 56.5, width: 15, height: 4 },
+  CINÉMATIQUES: { x: 3, y: 39.5, width: 15, height: 4 },
+  CRÉDITS: { x: 3, y: 44.5, width: 15, height: 4 },
+  "QUITTER DIABLO II": { x: 3, y: 50, width: 15, height: 4 },
   JOUER: { x: 43, y: 82, width: 14, height: 4 },
   "CRÉER NOUVEAU": { x: 84, y: 81, width: 14, height: 4 },
   CHARGEMENT: { x: 44, y: 69, width: 13, height: 5 },
