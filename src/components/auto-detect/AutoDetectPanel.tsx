@@ -1096,6 +1096,12 @@ export function AutoDetectPanel() {
           level loads. Values are percentages of the game window.
         </p>
 
+        <p className="text-xs text-muted-foreground">
+          CHARGEMENT is calibrated on a loading screen, not on the character
+          select. The All anchors run at the character select cannot save it:
+          select CHARGEMENT while a level loads, test it, then save this anchor.
+        </p>
+
         <div className="space-y-1.5">
           <Label htmlFor="menu-anchor-select">Anchor</Label>
           <select
@@ -1315,7 +1321,7 @@ export function AutoDetectPanel() {
               <p className="text-xs text-muted-foreground">
                 {loadingAnchorSaved
                   ? "The loading anchor feeds the loading guard: its one-frame signal keeps the phase and suppresses menu false-positives while a level loads."
-                  : "No loading guard; loading false-positives may end runs."}
+                  : "No loading guard; loading false-positives may end runs. Capture CHARGEMENT while a loading screen is visible, then save it."}
               </p>
               <p className="text-xs text-muted-foreground">
                 {templateMenuReady
